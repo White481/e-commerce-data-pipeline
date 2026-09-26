@@ -1,64 +1,58 @@
-# E-Commerce Data Engineering Pipeline
-
-End-to-end data pipeline ที่แปลงข้อมูลยอดขายร้านค้าออนไลน์ดิบ (Online Retail dataset, UCI/Kaggle) 
-ให้กลายเป็น structured data warehouse พร้อมสำหรับการวิเคราะห์ธุรกิจ
-
-## Architecture
-Raw Data (Excel)
-↓ [Python + pandas]
-Cleansed Data (CSV)
-↓ [Python + SQLAlchemy]
-PostgreSQL (Docker) — Star Schema
-↓ [SQL]
-Business Insights
-
 
 **Stack:** Python, pandas, PostgreSQL 16, Docker, SQLAlchemy, SQL
 
 ## Data Model (Star Schema)
 
-- `fact_sales` — ตารางกลาง เก็บ transaction ทุกรายการ
-- `dim_customer` — ข้อมูลลูกค้า + ประเทศ
-- `dim_product` — ข้อมูลสินค้า
-- `dim_date` — ปฏิทิน แยก year/month/day/weekday
+- `fact_sales` — central table storing every transaction
+- `dim_customer` — customer info + country
+- `dim_product` — product details
+- `dim_date` — calendar table, broken down by year/month/day/weekday
 
-เลือกใช้ star schema เพราะเป็นมาตรฐานของ data warehouse ที่ทำให้ query วิเคราะห์ธุรกิจ (revenue, top products) เร็วและอ่านง่าย
+A star schema was chosen because it's the standard data warehouse pattern 
+that makes business analysis queries (revenue, top products) fast and easy to read.
 
 ## Data Quality Decisions
 
-ระหว่างทำความสะอาดข้อมูล เจอปัญหาข้อมูล 2 จุด ที่ต้องตัดสินใจว่าจะจัดการยังไง:
+While cleansing the data, I found two issues that required a deliberate decision on how to handle them:
 
-1. **CustomerID หายไป ~25% ของข้อมูล** — ตัดสินใจ drop ทิ้ง เพราะไม่สามารถวิเคราะห์ per-customer ได้ถ้าไม่รู้ว่าใครซื้อ สมมติฐาน: ระบบขายหน้าร้าน/POS อาจอนุญาตให้ลูกค้าซื้อแบบ guest โดยไม่ login
-2. **Quantity ติดลบ (~10,600 แถว)** — ไม่ใช่ error แต่คือ**การคืนสินค้า** เก็บไว้และเพิ่ม flag คอลัมน์ `is_return` แทนการทิ้ง เพื่อให้ยังวิเคราะห์ยอด return แยกได้
+1. **CustomerID missing in ~25% of rows** — decided to drop these rows, since per-customer 
+   analysis isn't possible without knowing who made the purchase. Hypothesis: the point-of-sale 
+   system may allow guest checkout without requiring login.
+2. **Negative Quantity values (~10,600 rows)** — not an error, but **product returns**. 
+   Kept these rows and added an `is_return` flag column instead of discarding them, 
+   so return volume can still be analyzed separately.
 
 ## Setup
 
 ```bash
-# 1. เปิด Postgres container
+# 1. Start the Postgres container
 docker compose up -d
 
-# 2. สร้างตาราง
-# รันไฟล์ models/create_tables.sql ผ่าน SQL client (SQLTools/psql)
+# 2. Create tables
+# Run models/create_tables.sql via a SQL client (SQLTools/psql)
 
-# 3. ทำความสะอาดข้อมูล
+# 3. Clean the data
 python ingest/clean_data.py
 
-# 4. โหลดข้อมูลเข้า Postgres
+# 4. Load data into Postgres
 python ingest/load_to_postgres.py
 
-# 5. รัน SQL วิเคราะห์ธุรกิจ
-# ดูที่ models/analysis_queries.sql
+# 5. Run business analysis queries
+# See models/analysis_queries.sql
 ```
 
 ## Business Insights
 
-ดูผลลัพธ์เต็มได้ที่ `models/analysis_queries.sql` ครอบคลุม:
+Full queries available in `models/analysis_queries.sql`, covering:
 - Monthly revenue trend
-- Top 10 สินค้าขายดี
-- Top 10 ลูกค้าที่ใช้จ่ายสูงสุด
-- ยอด return แยกตามเดือน
+- Top 10 best-selling products
+- Top 10 customers by spend
+- Monthly return volume
 
 ## Lessons Learned
 
-- Docker volume เก็บ password ไว้ตอนสร้างครั้งแรกเท่านั้น — แก้ `docker-compose.yml` ทีหลังไม่มีผลถ้า volume เดิมยังอยู่ ต้อง `docker compose down -v` เพื่อ recreate
-- `pandas.to_sql(if_exists="append")` จะสร้างตารางเองถ้ายังไม่มีอยู่ — อันตรายเพราะจะไม่มี constraint (PK/FK) ตามที่ตั้งใจ ควรแยก schema management (SQL DDL) ออกจาก data loading (Python) ให้ชัดเจน
+- A Docker volume only sets the password at first creation — editing `docker-compose.yml` 
+  afterward has no effect if the volume already exists. Requires `docker compose down -v` to recreate.
+- `pandas.to_sql(if_exists="append")` will auto-create a table if it doesn't exist yet — 
+  this is risky because the table won't have the intended constraints (PK/FK). Schema management 
+  (SQL DDL) should be kept clearly separate from data loading (Python).
