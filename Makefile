@@ -1,4 +1,4 @@
-.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last test lint
+.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last airflow-up backfill test lint
 
 up:
 	docker compose up -d
@@ -32,6 +32,13 @@ load-day:  # make load-day DATE=2011-01-05
 
 load-since-last:
 	python -m ingest.run load --since-last
+
+airflow-up:  # UI: http://localhost:8080
+	docker compose up -d --build airflow
+
+backfill:  # make backfill FROM=2011-01-01 TO=2011-01-31 (DAG ต้อง unpause ก่อน run ถึงจะเริ่ม)
+	docker compose exec airflow airflow backfill create --dag-id ecommerce_daily \
+		--from-date $(FROM) --to-date $(TO) --max-active-runs 1
 
 test:
 	pytest -q

@@ -13,7 +13,9 @@ from ingest.load_raw import init_db
 def truncate(engine):
     with engine.begin() as conn:
         conn.exec_driver_sql(
-            "TRUNCATE raw.online_retail, audit.rejected_rows, audit.pipeline_runs RESTART IDENTITY"
+            "TRUNCATE raw.online_retail, audit.rejected_rows, audit.pipeline_runs, "
+            "mart.fact_sales, mart.dim_customer, mart.dim_product, mart.dim_date "
+            "RESTART IDENTITY"
         )
 
 

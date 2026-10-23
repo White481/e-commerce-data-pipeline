@@ -82,3 +82,31 @@ Revenue total (`sum(quantity * unit_price)`) was 9,747,747.93 before and after.
 | Load 5 days, then the same 5 again | 13,963 → 13,963 rows, 2nd round 0 inserted / 0 updated |
 | Missing day (2010-12-04) | `skipped`, exit 0 |
 | Delete last 3 days → `--since-last` | 5,205 → 13,963 rows |
+
+## Phase 5 — Airflow
+
+- Pinned `apache/airflow:3.3.2-python3.12`. Verified the imports inside the image instead of
+  trusting memory: `airflow.sdk.DAG`, `airflow.providers.standard.operators.bash.BashOperator`,
+  `airflow.timetables.interval.CronDataIntervalTimetable`. Backfill in 3.x is
+  `airflow backfill create --from-date --to-date`, not `airflow dags backfill`.
+- Airflow 3 defaults `@daily` to a trigger timetable (logical date = run time, zero-length
+  interval). Used `CronDataIntervalTimetable` so `{{ ds }}` is the day being processed.
+- Image build failed: `/opt` isn't writable by the `airflow` user → create the venv dir as root
+  and `chown` it.
+- **Backfill runs sat in `queued` forever.** The scheduler only picks up runs of *unpaused* DAGs
+  — backfill runs included (`DagModel.is_paused == false()` in
+  `DagRun.get_queued_dag_runs_to_set_running`). Unpausing also starts `catchup`, so catchup runs
+  ran alongside the backfill. Harmless only because every task is idempotent.
+- Docker was stopped mid-run (by me). Re-paused the DAG with a one-off
+  `docker compose run --rm airflow airflow dags pause` *before* starting the scheduler again.
+- The fail-injection flag was global at first — it would have failed every concurrent catchup
+  run too. Made it per day: `data/.fail_transform_YYYY-MM-DD`.
+- `airflow tasks clear -s/-e` matched nothing for a backfill run; clearing through the REST API
+  (`POST /api/v2/dags/{dag_id}/clearTaskInstances` with `dag_run_id`, `dry_run` first) worked.
+- **A second backfill from the UI reset 28 green runs.** The UI backfill dialog was submitted with
+  reprocess behavior `completed`, which re-queued the already-successful January runs (tasks back
+  to "no status"); stopping it with ■ marked every not-yet-run run `failed`. No task had run, so
+  data was untouched (verified: raw 539,392 rows, mart matches raw on all 121 days, 0 duplicate
+  `line_id`). Fixed with `airflow backfill create ... --reprocess-behavior failed` → 31/31 green.
+  Lesson: in Airflow 3 the backfill banner's ■ *cancels* the backfill, and "reprocess completed"
+  re-runs days that already succeeded.

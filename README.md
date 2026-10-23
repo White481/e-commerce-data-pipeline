@@ -60,6 +60,36 @@ the fact model in dbt), where it's a modelling choice rather than a data-quality
 - Loading all 305 daily files gives exactly the same result as the one-shot load:
   539,392 rows, revenue 9,769,872.05.
 
+## Orchestration (Phase 5)
+
+`dags/ecommerce_daily.py` (Airflow 3.3.2, standalone in `docker-compose.yml`) runs one day per DAG run:
+
+```
+setup → ingest → transform → notify
+```
+
+| Task | Command | Why it's safe to retry |
+|---|---|---|
+| setup | `ingest.run init` | `CREATE ... IF NOT EXISTS` only |
+| ingest | `ingest.run load --date {{ ds }}` | upsert by `line_id` + replace that day; no file → `skipped`, exit 0 |
+| transform | `ingest.run transform --date {{ ds }}` | one transaction: dims `ON CONFLICT DO NOTHING`, fact rows of that day deleted and re-inserted |
+| notify | `ingest.run notify --date {{ ds }}` | read-only summary in the task log |
+
+`catchup=True`, `retries=2`, `max_active_runs=1`, classic daily data intervals
+(`CronDataIntervalTimetable`) so the run with logical date 2011-01-05 processes 2011-01-05.
+Pipeline dependencies live in a separate venv inside the image (`/opt/pipeline-venv`) so pandas 3 /
+SQLAlchemy 2 don't fight Airflow's own pins. Reviewed circuit-breaker overrides can be passed as
+run conf: `{"max_reject_rate": 0.25}`.
+
+**Proof (January 2011 backfill):** 31/31 runs green; January raw rows deleted beforehand were
+reloaded (35,007); days without a file were `skipped` and stayed green. Mart vs raw for every
+processed day: rows and revenue match, 0 duplicate `line_id`s. Failure test: forced `transform`
+for 2011-01-05 to fail after writing (all 3 tries failed, rolled back), removed the flag, cleared
+the task — the day still has exactly 1,117 fact rows / 28,150.40 before, after the failure, and
+after the re-run.
+
+![Airflow Graph view: setup → ingest → transform → notify](docs/airflow_graph.png)
+
 ## Setup
 
 Requires Python 3.11+ (pandas 3.x) and Docker.
@@ -90,6 +120,10 @@ make load-raw
 make split                      # data/landing/YYYY-MM-DD.csv, one file per day
 make load-day DATE=2011-01-05   # one day; a missing file is recorded as "skipped"
 make load-since-last            # catch up from the watermark (re-loads the watermark day)
+
+# Airflow (Phase 5) — UI at http://localhost:8080 (local only, no login)
+make airflow-up
+make backfill FROM=2011-01-01 TO=2011-01-31
 
 # 5. Business analysis queries: see analyses/analysis_queries.sql
 ```

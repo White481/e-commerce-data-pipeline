@@ -18,3 +18,6 @@ data/landing/
 dbt_project/target/
 dbt_project/logs/
 logs/
+
+# Airflow failure-injection flag (see ingest/run.py)
+data/.fail_*
