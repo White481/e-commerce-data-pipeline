@@ -2,14 +2,16 @@ services:
   postgres:
     image: postgres:16
     container_name: ecommerce_postgres
-    environment:
-      POSTGRES_DB: ecommerce
-      POSTGRES_USER: white
-      POSTGRES_PASSWORD: Peerawhite14
+    env_file: .env          # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
 volumes:
   pgdata:
