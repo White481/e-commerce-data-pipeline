@@ -41,3 +41,19 @@ different order, ids would shift. Fine for a static file; a real source system s
 | 3 | re-run | 10,098 | 0 | 541,909 |
 
 Revenue total (`sum(quantity * unit_price)`) was 9,747,747.93 before and after.
+
+## Phase 2 — data quality
+
+- Profiled every candidate rule on the full file before choosing thresholds. Missing
+  `CustomerID` = 24.9% → would trip a 5% circuit breaker on every batch, so it stayed out of
+  validation (reasoning in README).
+- `unit_price <= 0` (2,517 rows) also covers every row with a missing `Description` (1,454)
+  and every non-`C` invoice with negative quantity (1,336) — they all have price 0.
+  2 rows are `A56318x` "Adjust bad debt" with price −11,062.06.
+- Rows rejected now had already been loaded in Phase 1. Upsert alone never deletes, so the
+  load now also deletes rejected `line_id`s inside the same transaction.
+- pandera reports a check that *crashes* (e.g. `quantity` is a string) as a failure case with
+  no row index. Dropping those silently would let a malformed batch pass, so `validate()`
+  raises instead.
+- Revenue in raw went from 9,747,747.93 to 9,769,872.05 after validation — the two
+  bad-debt adjustment rows (−22,124.12) were removed.

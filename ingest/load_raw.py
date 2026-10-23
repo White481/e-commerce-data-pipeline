@@ -1,10 +1,12 @@
 """โหลดข้อมูลดิบเข้า raw.online_retail แบบ idempotent
 
 - รันซ้ำกี่รอบก็ได้ผลเหมือนเดิม (upsert ด้วย line_id)
+- แถวที่ไม่ผ่าน validate เขียนลง audit.rejected_rows พร้อมเหตุผล
 - ทุกการรันเขียน 1 แถวลง audit.pipeline_runs
 """
 
 import io
+import json
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from ingest.db import get_engine
+from ingest.validate import check_reject_rate, validate
 
 PIPELINE = "load_raw"
 SOURCE_FILE = "data/Online Retail.xlsx"
@@ -87,13 +90,37 @@ def _finish_run(engine: Engine, run_id: int, **fields) -> None:
         )
 
 
+def _write_rejected(engine: Engine, run_id: int, bad: pd.DataFrame) -> None:
+    if bad.empty:
+        return
+    records = json.loads(bad.drop(columns="reason").to_json(orient="records", date_format="iso"))
+    params = [
+        {"run_id": run_id, "line_id": line_id, "reason": reason, "record": json.dumps(record)}
+        for line_id, reason, record in zip(bad["line_id"], bad["reason"], records)
+    ]
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO audit.rejected_rows (run_id, line_id, reason, record)
+                VALUES (:run_id, :line_id, :reason, CAST(:record AS JSONB))
+            """),
+            params,
+        )
+
+
 def load_raw(df: pd.DataFrame, engine: Engine, source_file: str) -> dict:
     # audit row แยก transaction: ถ้าโหลดล้ม rollback แล้ว ยังมีบันทึกว่ารันแล้วล้ม
     run_id = _start_run(engine, source_file)
+    rows_read, rows_rejected = len(df), 0
     try:
-        rows = prepare(df, source_file)
+        good, bad = validate(prepare(df, source_file))
+        rows_rejected = len(bad)
+        # เขียนแถวเสียก่อนเช็ก circuit breaker เพื่อให้ดูได้ว่าทำไม batch ถูกตัด
+        _write_rejected(engine, run_id, bad)
+        check_reject_rate(rows_read, rows_rejected)
+
         buf = io.StringIO()
-        rows.to_csv(buf, index=False, header=False)
+        good.to_csv(buf, index=False, header=False)
         buf.seek(0)
 
         # ทุกอย่างด้านล่างอยู่ใน transaction เดียว: สำเร็จทั้งหมดหรือไม่มีอะไรเปลี่ยนเลย
@@ -108,12 +135,30 @@ def load_raw(df: pd.DataFrame, engine: Engine, source_file: str) -> dict:
                 buf,
             )
             inserted, updated = conn.execute(text(UPSERT_SQL), {"run_id": run_id}).one()
+            # แถวที่ตอนนี้ไม่ผ่านกฎ แต่เคยโหลดเข้าไปแล้วในรอบก่อน ต้องเอาออก
+            if not bad.empty:
+                conn.execute(
+                    text("DELETE FROM raw.online_retail WHERE line_id = ANY(:ids)"),
+                    {"ids": bad["line_id"].tolist()},
+                )
     except Exception as exc:
-        _finish_run(engine, run_id, status="failed", error_message=str(exc)[:2000])
+        _finish_run(
+            engine, run_id, status="failed", rows_read=rows_read,
+            rows_rejected=rows_rejected, error_message=str(exc)[:2000],
+        )
         raise
 
-    summary = {"rows_read": len(rows), "rows_inserted": inserted, "rows_updated": updated}
-    _finish_run(engine, run_id, status="success", **summary)
+    summary = {
+        "rows_read": rows_read,
+        "rows_rejected": rows_rejected,
+        "rows_loaded": len(good),
+        "rows_inserted": inserted,
+        "rows_updated": updated,
+    }
+    _finish_run(
+        engine, run_id, status="success",
+        **{k: v for k, v in summary.items() if k != "rows_loaded"},
+    )
     return {"run_id": run_id, **summary}
 
 
@@ -124,8 +169,8 @@ def main() -> None:
     summary = load_raw(df, engine, SOURCE_FILE)
     print(
         f"run_id={summary['run_id']}: อ่าน {summary['rows_read']} แถว, "
-        f"insert {summary['rows_inserted']}, update {summary['rows_updated']}, "
-        f"ไม่เปลี่ยน {summary['rows_read'] - summary['rows_inserted'] - summary['rows_updated']}"
+        f"ปฏิเสธ {summary['rows_rejected']}, โหลด {summary['rows_loaded']} "
+        f"(insert {summary['rows_inserted']}, update {summary['rows_updated']})"
     )
 
 
