@@ -1,4 +1,4 @@
-.PHONY: up down psql init-db create-tables clean-data load load-raw test lint
+.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last test lint
 
 up:
 	docker compose up -d
@@ -23,6 +23,15 @@ load:
 
 load-raw:
 	python -m ingest.load_raw
+
+split:
+	python -m ingest.split_batches
+
+load-day:  # make load-day DATE=2011-01-05
+	python -m ingest.run load --date $(DATE)
+
+load-since-last:
+	python -m ingest.run load --since-last
 
 test:
 	pytest -q

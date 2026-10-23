@@ -19,6 +19,10 @@ CREATE TABLE IF NOT EXISTS audit.pipeline_runs (
     error_message TEXT
 );
 
+-- เพิ่มทีหลัง (Phase 3): รัน init ซ้ำบน DB เดิมได้
+ALTER TABLE audit.pipeline_runs ADD COLUMN IF NOT EXISTS batch_date DATE;
+ALTER TABLE audit.pipeline_runs ADD COLUMN IF NOT EXISTS max_reject_rate NUMERIC;
+
 -- Raw: เก็บข้อมูลดิบทุกแถวตามต้นฉบับ (ยังไม่ clean)
 -- grain = 1 บรรทัดใน invoice, line_id = '<invoice_no>-<line_no>'
 CREATE TABLE IF NOT EXISTS raw.online_retail (
@@ -36,6 +40,9 @@ CREATE TABLE IF NOT EXISTS raw.online_retail (
     run_id       BIGINT REFERENCES audit.pipeline_runs(run_id),
     loaded_at    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE INDEX IF NOT EXISTS online_retail_invoice_date_idx
+    ON raw.online_retail (invoice_date);
 
 -- Audit: แถวที่ไม่ผ่าน validation (ใช้ใน Phase 2)
 CREATE TABLE IF NOT EXISTS audit.rejected_rows (

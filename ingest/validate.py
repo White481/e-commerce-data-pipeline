@@ -68,9 +68,11 @@ def validate(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     return df[~bad_mask], bad
 
 
-def check_reject_rate(rows_read: int, rows_rejected: int) -> None:
-    if rows_read and rows_rejected / rows_read > MAX_REJECT_RATE:
+def check_reject_rate(
+    rows_read: int, rows_rejected: int, max_rate: float = MAX_REJECT_RATE
+) -> None:
+    if rows_read and rows_rejected / rows_read > max_rate:
         raise CircuitBreakerError(
             f"rejected {rows_rejected}/{rows_read} rows "
-            f"({rows_rejected / rows_read:.1%}) > {MAX_REJECT_RATE:.0%}"
+            f"({rows_rejected / rows_read:.1%}) > {max_rate:.0%}"
         )
