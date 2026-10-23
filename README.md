@@ -25,25 +25,29 @@ While cleansing the data, I found two issues that required a deliberate decision
 ## Setup
 
 ```bash
-# 1. Start the Postgres container
-docker compose up -d
+# 0. Configure credentials (never commit .env)
+cp .env.example .env          # then edit the values
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+
+# 1. Start Postgres
+make up
 
 # 2. Create tables
-# Run models/create_tables.sql via a SQL client (SQLTools/psql)
+make create-tables
 
-# 3. Clean the data
-python ingest/clean_data.py
+# 3. Clean the raw data
+make clean-data
 
-# 4. Load data into Postgres
-python ingest/load_to_postgres.py
+# 4. Load into Postgres
+make load
 
-# 5. Run business analysis queries
-# See models/analysis_queries.sql
+# 5. Business analysis queries: see analyses/analysis_queries.sql
 ```
 
 ## Business Insights
 
-Full queries available in `models/analysis_queries.sql`, covering:
+Full queries available in `analyses/analysis_queries.sql`, covering:
 - Monthly revenue trend
 - Top 10 best-selling products
 - Top 10 customers by spend

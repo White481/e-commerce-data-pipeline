@@ -1,8 +1,9 @@
 import pandas as pd
-from sqlalchemy import create_engine
 
-# 1. เชื่อมต่อ Postgres (ค่าตรงกับ docker-compose.yml)
-engine = create_engine("postgresql://white:Peerawhite14@localhost:5432/ecommerce")
+from ingest.db import get_engine
+
+# 1. เชื่อมต่อ Postgres (อ่านค่าจาก .env)
+engine = get_engine()
 
 # 2. โหลดข้อมูลที่ clean แล้ว
 df = pd.read_csv("data/cleaned_online_retail.csv")
