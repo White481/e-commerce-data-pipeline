@@ -103,3 +103,10 @@ Revenue total (`sum(quantity * unit_price)`) was 9,747,747.93 before and after.
   run too. Made it per day: `data/.fail_transform_YYYY-MM-DD`.
 - `airflow tasks clear -s/-e` matched nothing for a backfill run; clearing through the REST API
   (`POST /api/v2/dags/{dag_id}/clearTaskInstances` with `dag_run_id`, `dry_run` first) worked.
+- **A second backfill from the UI reset 28 green runs.** The UI backfill dialog was submitted with
+  reprocess behavior `completed`, which re-queued the already-successful January runs (tasks back
+  to "no status"); stopping it with ■ marked every not-yet-run run `failed`. No task had run, so
+  data was untouched (verified: raw 539,392 rows, mart matches raw on all 121 days, 0 duplicate
+  `line_id`). Fixed with `airflow backfill create ... --reprocess-behavior failed` → 31/31 green.
+  Lesson: in Airflow 3 the backfill banner's ■ *cancels* the backfill, and "reprocess completed"
+  re-runs days that already succeeded.
