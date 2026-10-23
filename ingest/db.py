@@ -23,13 +23,13 @@ def _require(name: str) -> str:
     return value
 
 
-def get_engine() -> Engine:
+def get_engine(database: str | None = None) -> Engine:
     url = URL.create(
         drivername="postgresql+psycopg2",
         username=_require("POSTGRES_USER"),
         password=_require("POSTGRES_PASSWORD"),
         host=os.getenv("POSTGRES_HOST", "localhost"),
         port=int(os.getenv("POSTGRES_PORT", "5432")),
-        database=_require("POSTGRES_DB"),
+        database=database or _require("POSTGRES_DB"),
     )
     return create_engine(url)
