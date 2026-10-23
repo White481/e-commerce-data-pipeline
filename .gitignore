@@ -1,4 +1,20 @@
+# Python
 venv/
+.venv/
 __pycache__/
 *.pyc
+.pytest_cache/
+.ruff_cache/
+
+# Secrets (keep .env.example in Git, never .env)
+.env
+
+# Editor / OS
+.vscode/
 .DS_Store
+
+# Generated data & tool outputs
+data/landing/
+dbt_project/target/
+dbt_project/logs/
+logs/
