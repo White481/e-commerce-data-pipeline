@@ -22,6 +22,29 @@ While cleansing the data, I found two issues that required a deliberate decision
    Kept these rows and added an `is_return` flag column instead of discarding them, 
    so return volume can still be analyzed separately.
 
+## Validation Rules (Phase 2)
+
+`ingest/validate.py` (pandera) runs before every load. Failing rows are **not** loaded;
+they go to `audit.rejected_rows` with a reason, and each run prints how many rows were
+read / rejected / loaded.
+
+| Rule | Rows rejected (full file) |
+|---|---|
+| `unit_price <= 0` | 2,517 (0.46%) |
+| cancelled invoice (`C…`) with positive quantity | 0 |
+| `invoice_date` is null | 0 |
+| duplicate `line_id` | 0 |
+
+**Circuit breaker:** if more than 5% of a batch is rejected, the whole batch is stopped
+(nothing is loaded, the run is marked `failed`). That much bad data usually means a broken
+export, not a few bad rows.
+
+**Why missing `CustomerID` is not a validation rule:** it affects 24.9% of rows, so it would
+trip the circuit breaker on every batch. More importantly, it isn't invalid data — those are
+real sales (likely guest checkout) and they still count toward revenue and product totals.
+The raw layer keeps them; the per-customer filter stays in `clean_data.py` (and will move to
+the fact model in dbt), where it's a modelling choice rather than a data-quality failure.
+
 ## Setup
 
 Requires Python 3.11+ (pandas 3.x) and Docker.
@@ -43,6 +66,10 @@ make clean-data
 
 # 4. Load into Postgres
 make load
+
+# Raw layer with validation + audit (Phase 1–2)
+make init-db
+make load-raw
 
 # 5. Business analysis queries: see analyses/analysis_queries.sql
 ```
