@@ -45,6 +45,21 @@ real sales (likely guest checkout) and they still count toward revenue and produ
 The raw layer keeps them; the per-customer filter stays in `clean_data.py` (and will move to
 the fact model in dbt), where it's a modelling choice rather than a data-quality failure.
 
+## Incremental Loading (Phase 3)
+
+- Each daily file is the full truth for that day: the load upserts by `line_id`, then deletes
+  that day's rows that are no longer in the file (rejected now, or removed at the source).
+- **Watermark** = latest day that actually has rows in `raw.online_retail` (not what the audit
+  log says ran), so deleted data is reloaded automatically. `--since-last` starts at the
+  watermark day — or at the first day that has a landing file but no rows, if that is earlier —
+  so an out-of-order load can't leave a gap.
+- **Reviewed overrides:** two real days exceed the 5% circuit breaker (2010-12-22: 22.0%,
+  2011-01-28: 5.1% — zero-price stock adjustments). After checking them, they were loaded with
+  `--max-reject-rate`. The approved rate is stored in `audit.pipeline_runs` and reused when
+  that day is reloaded, so the breaker doesn't block the same reviewed day again.
+- Loading all 305 daily files gives exactly the same result as the one-shot load:
+  539,392 rows, revenue 9,769,872.05.
+
 ## Setup
 
 Requires Python 3.11+ (pandas 3.x) and Docker.
@@ -70,6 +85,11 @@ make load
 # Raw layer with validation + audit (Phase 1–2)
 make init-db
 make load-raw
+
+# Incremental daily loads (Phase 3)
+make split                      # data/landing/YYYY-MM-DD.csv, one file per day
+make load-day DATE=2011-01-05   # one day; a missing file is recorded as "skipped"
+make load-since-last            # catch up from the watermark (re-loads the watermark day)
 
 # 5. Business analysis queries: see analyses/analysis_queries.sql
 ```

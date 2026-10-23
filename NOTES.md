@@ -57,3 +57,28 @@ Revenue total (`sum(quantity * unit_price)`) was 9,747,747.93 before and after.
   raises instead.
 - Revenue in raw went from 9,747,747.93 to 9,769,872.05 after validation — the two
   bad-debt adjustment rows (−22,124.12) were removed.
+
+## Phase 3 — incremental loading
+
+- Checked before splitting: no invoice spans two days, and `line_id`s built per daily file are
+  identical to the full-file ones — so daily loads and the one-shot load agree.
+- **Per-day circuit breaker trips on real data.** 2 of 305 days exceed 5% rejected
+  (2010-12-22: 64/291 = 22.0%, 2011-01-28: 51/1008 = 5.1%), all zero-price rows with no
+  customer — stock adjustments, not a broken export. Kept the 5% rule and added a reviewed
+  override (`--max-reject-rate`), recorded in audit.
+- **Bug: approved override wasn't remembered.** `--since-last` re-loads the watermark day; when
+  that day needed an override, the breaker tripped again on every run and the pipeline was stuck.
+  Fix: reuse the highest rate that already succeeded for that `batch_date`.
+- **Bug: data-based watermark skipped 22 days.** After `--since-last` stopped at 2010-12-22, I
+  loaded 2011-01-28 directly; the watermark jumped to 01-28 and 2010-12-23 → 2011-01-27 were never
+  loaded (506,611 rows instead of 539,392). Fix: start from the first landing day that has no
+  rows in raw if it's earlier than the watermark. Reconciled afterwards: 539,392 rows,
+  9,769,872.05 — same as the full-file load.
+- A file moving to a different path made every row count as "updated" (`source_file` was part of
+  the change check). Excluded it from the comparison.
+
+| Check (real data) | Result |
+|---|---|
+| Load 5 days, then the same 5 again | 13,963 → 13,963 rows, 2nd round 0 inserted / 0 updated |
+| Missing day (2010-12-04) | `skipped`, exit 0 |
+| Delete last 3 days → `--since-last` | 5,205 → 13,963 rows |
