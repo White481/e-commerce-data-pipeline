@@ -88,7 +88,7 @@ for 2011-01-05 to fail after writing (all 3 tries failed, rolled back), removed 
 the task — the day still has exactly 1,117 fact rows / 28,150.40 before, after the failure, and
 after the re-run.
 
-<!-- Graph view screenshot: docs/airflow_graph.png -->
+![Airflow Graph view: setup → ingest → transform → notify](docs/airflow_graph.png)
 
 ## Setup
 
