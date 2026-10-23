@@ -24,10 +24,12 @@ While cleansing the data, I found two issues that required a deliberate decision
 
 ## Setup
 
+Requires Python 3.11+ (pandas 3.x) and Docker.
+
 ```bash
 # 0. Configure credentials (never commit .env)
 cp .env.example .env          # then edit the values
-python -m venv venv && source venv/bin/activate
+python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
 # 1. Start Postgres
@@ -44,6 +46,11 @@ make load
 
 # 5. Business analysis queries: see analyses/analysis_queries.sql
 ```
+
+Run the unit tests and linter with `make test` and `make lint`.
+
+> `make load` appends, so re-running it on a populated database fails on primary keys.
+> To start fresh: `docker compose down -v && make up && make create-tables && make load`.
 
 ## Business Insights
 
