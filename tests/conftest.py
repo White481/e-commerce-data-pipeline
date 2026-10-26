@@ -29,6 +29,9 @@ def engine():
             if not exists:
                 conn.exec_driver_sql(f'CREATE DATABASE "{test_db}"')
     except OperationalError:
+        # ในเครื่องยอมให้ skip ได้ แต่ใน CI (GitHub ตั้ง CI=true) ต้องล้ม ไม่งั้นเทสต์ DB จะหายเงียบ
+        if os.getenv("CI"):
+            pytest.fail("Postgres is not reachable in CI")
         pytest.skip("Postgres is not running (make up)")
     finally:
         admin.dispose()
