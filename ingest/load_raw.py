@@ -1,10 +1,13 @@
 """โหลดข้อมูลดิบเข้า raw.online_retail แบบ idempotent
 
 - รันซ้ำกี่รอบก็ได้ผลเหมือนเดิม (upsert ด้วย line_id)
+- แถวที่ไม่ผ่าน validate เขียนลง audit.rejected_rows พร้อมเหตุผล
 - ทุกการรันเขียน 1 แถวลง audit.pipeline_runs
 """
 
 import io
+import json
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -12,17 +15,20 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from ingest.db import get_engine
+from ingest.validate import MAX_REJECT_RATE, check_reject_rate, validate
 
 PIPELINE = "load_raw"
 SOURCE_FILE = "data/Online Retail.xlsx"
-INIT_SQL = Path(__file__).resolve().parent.parent / "sql" / "init.sql"
+SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
+INIT_SQL = SQL_DIR / "init.sql"
 
 COLUMNS = [
     "line_id", "invoice_no", "line_no", "stock_code", "description",
     "quantity", "invoice_date", "unit_price", "customer_id", "country", "source_file",
 ]
-# คอลัมน์ที่ใช้เช็กว่าแถวเปลี่ยนจริงไหม ก่อนจะ UPDATE
 DATA_COLUMNS = COLUMNS[1:]
+# คอลัมน์ที่ใช้เช็กว่าแถวเปลี่ยนจริงไหม ก่อนจะ UPDATE (ไฟล์ต้นทางย้ายที่ไม่นับว่าข้อมูลเปลี่ยน)
+COMPARE_COLUMNS = [c for c in DATA_COLUMNS if c != "source_file"]
 
 UPSERT_SQL = f"""
 WITH upserted AS (
@@ -32,8 +38,8 @@ WITH upserted AS (
         {", ".join(f"{c} = EXCLUDED.{c}" for c in DATA_COLUMNS)},
         run_id = EXCLUDED.run_id,
         loaded_at = now()
-    WHERE ({", ".join(f"raw.online_retail.{c}" for c in DATA_COLUMNS)})
-          IS DISTINCT FROM ({", ".join(f"EXCLUDED.{c}" for c in DATA_COLUMNS)})
+    WHERE ({", ".join(f"raw.online_retail.{c}" for c in COMPARE_COLUMNS)})
+          IS DISTINCT FROM ({", ".join(f"EXCLUDED.{c}" for c in COMPARE_COLUMNS)})
     RETURNING (xmax = 0) AS inserted
 )
 SELECT count(*) FILTER (WHERE inserted)     AS inserted,
@@ -66,16 +72,30 @@ def prepare(df: pd.DataFrame, source_file: str) -> pd.DataFrame:
     return out[COLUMNS]
 
 
-def _start_run(engine: Engine, source_file: str) -> int:
+def _start_run(
+    engine: Engine, source_file: str, batch_date: date | None,
+    max_reject_rate: float, status: str = "running",
+) -> int:
     with engine.begin() as conn:
         return conn.execute(
             text("""
-                INSERT INTO audit.pipeline_runs (pipeline, source_file, status)
-                VALUES (:pipeline, :source_file, 'running')
+                INSERT INTO audit.pipeline_runs
+                    (pipeline, source_file, batch_date, max_reject_rate, status)
+                VALUES (:pipeline, :source_file, :batch_date, :max_reject_rate, :status)
                 RETURNING run_id
             """),
-            {"pipeline": PIPELINE, "source_file": source_file},
+            {
+                "pipeline": PIPELINE, "source_file": source_file, "batch_date": batch_date,
+                "max_reject_rate": max_reject_rate, "status": status,
+            },
         ).scalar_one()
+
+
+def record_skipped(engine: Engine, source_file: str, batch_date: date) -> int:
+    """วันที่ไม่มีไฟล์: บันทึกว่าข้าม ไม่ถือว่า error"""
+    run_id = _start_run(engine, source_file, batch_date, MAX_REJECT_RATE, status="skipped")
+    _finish_run(engine, run_id, rows_read=0)
+    return run_id
 
 
 def _finish_run(engine: Engine, run_id: int, **fields) -> None:
@@ -87,13 +107,41 @@ def _finish_run(engine: Engine, run_id: int, **fields) -> None:
         )
 
 
-def load_raw(df: pd.DataFrame, engine: Engine, source_file: str) -> dict:
+def _write_rejected(engine: Engine, run_id: int, bad: pd.DataFrame) -> None:
+    if bad.empty:
+        return
+    records = json.loads(bad.drop(columns="reason").to_json(orient="records", date_format="iso"))
+    params = [
+        {"run_id": run_id, "line_id": line_id, "reason": reason, "record": json.dumps(record)}
+        for line_id, reason, record in zip(bad["line_id"], bad["reason"], records)
+    ]
+    with engine.begin() as conn:
+        conn.execute(
+            text("""
+                INSERT INTO audit.rejected_rows (run_id, line_id, reason, record)
+                VALUES (:run_id, :line_id, :reason, CAST(:record AS JSONB))
+            """),
+            params,
+        )
+
+
+def load_raw(
+    df: pd.DataFrame, engine: Engine, source_file: str,
+    batch_date: date | None = None, max_reject_rate: float = MAX_REJECT_RATE,
+) -> dict:
+    """batch_date: ถ้าระบุ ไฟล์นี้คือข้อมูลทั้งหมดของวันนั้น แถวของวันนั้นที่ไม่อยู่ในไฟล์จะถูกลบ"""
     # audit row แยก transaction: ถ้าโหลดล้ม rollback แล้ว ยังมีบันทึกว่ารันแล้วล้ม
-    run_id = _start_run(engine, source_file)
+    run_id = _start_run(engine, source_file, batch_date, max_reject_rate)
+    rows_read, rows_rejected = len(df), 0
     try:
-        rows = prepare(df, source_file)
+        good, bad = validate(prepare(df, source_file))
+        rows_rejected = len(bad)
+        # เขียนแถวเสียก่อนเช็ก circuit breaker เพื่อให้ดูได้ว่าทำไม batch ถูกตัด
+        _write_rejected(engine, run_id, bad)
+        check_reject_rate(rows_read, rows_rejected, max_reject_rate)
+
         buf = io.StringIO()
-        rows.to_csv(buf, index=False, header=False)
+        good.to_csv(buf, index=False, header=False)
         buf.seek(0)
 
         # ทุกอย่างด้านล่างอยู่ใน transaction เดียว: สำเร็จทั้งหมดหรือไม่มีอะไรเปลี่ยนเลย
@@ -108,12 +156,43 @@ def load_raw(df: pd.DataFrame, engine: Engine, source_file: str) -> dict:
                 buf,
             )
             inserted, updated = conn.execute(text(UPSERT_SQL), {"run_id": run_id}).one()
+            if batch_date is not None:
+                # แทนที่ข้อมูลทั้งวัน: ลบแถวของวันนั้นที่ไม่อยู่ใน batch นี้
+                # (ถูกปฏิเสธรอบนี้ หรือหายไปจากไฟล์ต้นทาง)
+                conn.execute(
+                    text("""
+                        DELETE FROM raw.online_retail r
+                        WHERE r.invoice_date >= :day AND r.invoice_date < :next_day
+                          AND NOT EXISTS (
+                              SELECT 1 FROM stg_online_retail s WHERE s.line_id = r.line_id
+                          )
+                    """),
+                    {"day": batch_date, "next_day": batch_date + timedelta(days=1)},
+                )
+            elif not bad.empty:
+                # แถวที่ตอนนี้ไม่ผ่านกฎ แต่เคยโหลดเข้าไปแล้วในรอบก่อน ต้องเอาออก
+                conn.execute(
+                    text("DELETE FROM raw.online_retail WHERE line_id = ANY(:ids)"),
+                    {"ids": bad["line_id"].tolist()},
+                )
     except Exception as exc:
-        _finish_run(engine, run_id, status="failed", error_message=str(exc)[:2000])
+        _finish_run(
+            engine, run_id, status="failed", rows_read=rows_read,
+            rows_rejected=rows_rejected, error_message=str(exc)[:2000],
+        )
         raise
 
-    summary = {"rows_read": len(rows), "rows_inserted": inserted, "rows_updated": updated}
-    _finish_run(engine, run_id, status="success", **summary)
+    summary = {
+        "rows_read": rows_read,
+        "rows_rejected": rows_rejected,
+        "rows_loaded": len(good),
+        "rows_inserted": inserted,
+        "rows_updated": updated,
+    }
+    _finish_run(
+        engine, run_id, status="success",
+        **{k: v for k, v in summary.items() if k != "rows_loaded"},
+    )
     return {"run_id": run_id, **summary}
 
 
@@ -124,8 +203,8 @@ def main() -> None:
     summary = load_raw(df, engine, SOURCE_FILE)
     print(
         f"run_id={summary['run_id']}: อ่าน {summary['rows_read']} แถว, "
-        f"insert {summary['rows_inserted']}, update {summary['rows_updated']}, "
-        f"ไม่เปลี่ยน {summary['rows_read'] - summary['rows_inserted'] - summary['rows_updated']}"
+        f"ปฏิเสธ {summary['rows_rejected']}, โหลด {summary['rows_loaded']} "
+        f"(insert {summary['rows_inserted']}, update {summary['rows_updated']})"
     )
 
 

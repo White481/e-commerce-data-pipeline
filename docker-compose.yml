@@ -13,5 +13,34 @@ services:
       timeout: 5s
       retries: 10
 
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    image: ecommerce-airflow:3.3.2
+    container_name: ecommerce_airflow
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      # pipeline ใน container ต่อ Postgres ผ่าน network ของ compose
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+      # ใช้ในเครื่องเท่านั้น: ไม่ต้อง login
+      AIRFLOW__CORE__SIMPLE_AUTH_MANAGER_ALL_ADMINS: "true"
+    command: bash -c "python /opt/project/airflow/init_metadata_db.py && exec airflow standalone"
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./dags:/opt/airflow/dags
+      - .:/opt/project
+      - airflow_home:/opt/airflow/logs
+
 volumes:
   pgdata:
+  airflow_home:

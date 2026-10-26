@@ -1,50 +1,20 @@
-"""Integration test: ต้องมี Postgres รันอยู่ (make up) ไม่งั้นจะ skip
-
-ใช้ database แยก <POSTGRES_DB>_test เพื่อไม่ให้แตะข้อมูลจริง
-"""
-
-import os
+"""Integration test: ต้องมี Postgres รันอยู่ (make up) ไม่งั้นจะ skip"""
 
 import pandas as pd
 import psycopg2
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import OperationalError
 
-from ingest.db import get_engine
-from ingest.load_raw import init_db, load_raw
+from ingest.load_raw import load_raw
+from ingest.validate import CircuitBreakerError
+from tests.conftest import truncate
 
 SOURCE = "test.xlsx"
 
 
-@pytest.fixture(scope="module")
-def engine():
-    test_db = f"{os.getenv('POSTGRES_DB', 'ecommerce')}_test"
-    admin = get_engine(database="postgres").execution_options(isolation_level="AUTOCOMMIT")
-    try:
-        with admin.connect() as conn:
-            exists = conn.execute(
-                text("SELECT 1 FROM pg_database WHERE datname = :d"), {"d": test_db}
-            ).scalar()
-            if not exists:
-                conn.exec_driver_sql(f'CREATE DATABASE "{test_db}"')
-    except OperationalError:
-        pytest.skip("Postgres is not running (make up)")
-    finally:
-        admin.dispose()
-
-    eng = get_engine(database=test_db)
-    init_db(eng)
-    yield eng
-    eng.dispose()
-
-
 @pytest.fixture(autouse=True)
 def clean_tables(engine):
-    with engine.begin() as conn:
-        conn.exec_driver_sql(
-            "TRUNCATE raw.online_retail, audit.rejected_rows, audit.pipeline_runs RESTART IDENTITY"
-        )
+    truncate(engine)
 
 
 def _sample():
@@ -115,8 +85,7 @@ def test_each_run_writes_audit_row(engine):
 
 def test_failed_run_rolls_back_and_is_audited(engine):
     bad = _sample()
-    bad["Quantity"] = bad["Quantity"].astype(object)
-    bad.loc[4, "Quantity"] = "not-a-number"  # COPY จะล้มเพราะ quantity เป็น INT
+    bad.loc[4, "StockCode"] = "X" * 30  # ผ่าน validate แต่ COPY ล้ม (VARCHAR(20))
     with pytest.raises(psycopg2.DataError):
         load_raw(bad, engine, SOURCE)
 
@@ -126,3 +95,50 @@ def test_failed_run_rolls_back_and_is_audited(engine):
             "SELECT status, error_message FROM audit.pipeline_runs"
         )).one()
     assert status == "failed" and err
+
+
+def test_rejected_rows_are_audited_not_loaded(engine):
+    df = pd.concat([_sample()] * 5, ignore_index=True)  # 25 แถว
+    df["InvoiceNo"] = [f"{i // 5}{v}" for i, v in enumerate(df["InvoiceNo"])]
+    df.loc[0, "UnitPrice"] = 0  # 1/25 = 4% < 5%
+
+    result = load_raw(df, engine, SOURCE)
+
+    assert result["rows_rejected"] == 1 and result["rows_loaded"] == 24
+    assert _count(engine) == 24
+    with engine.connect() as conn:
+        reason, rejected_in_run = conn.execute(text("""
+            SELECT r.reason, p.rows_rejected
+            FROM audit.rejected_rows r JOIN audit.pipeline_runs p USING (run_id)
+        """)).one()
+    assert reason == "unit_price <= 0" and rejected_in_run == 1
+
+
+def test_circuit_breaker_blocks_whole_batch(engine):
+    df = _sample()
+    df.loc[[0, 1], "UnitPrice"] = 0  # 2/5 = 40%
+
+    with pytest.raises(CircuitBreakerError):
+        load_raw(df, engine, SOURCE)
+
+    assert _count(engine) == 0
+    assert _count(engine, "audit.rejected_rows") == 2
+    with engine.connect() as conn:
+        status = conn.execute(text("SELECT status FROM audit.pipeline_runs")).scalar_one()
+    assert status == "failed"
+
+
+def test_row_that_becomes_invalid_is_removed(engine):
+    load_raw(_sample(), engine, SOURCE)
+
+    # รอบสอง: แถว 536380-1 ที่เคยโหลดแล้วกลายเป็นราคา 0 (1 ใน 25 แถว = 4%)
+    df = pd.concat([_sample()] + [_sample().assign(InvoiceNo=f"9{i}") for i in range(4)],
+                   ignore_index=True)
+    df.loc[4, "UnitPrice"] = 0
+    load_raw(df, engine, SOURCE)
+
+    with engine.connect() as conn:
+        remaining = conn.execute(text(
+            "SELECT count(*) FROM raw.online_retail WHERE line_id = '536380-1'"
+        )).scalar()
+    assert remaining == 0
