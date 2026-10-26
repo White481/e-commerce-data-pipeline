@@ -6,7 +6,7 @@ import pandas as pd
 import pytest
 from sqlalchemy import text
 
-from ingest.run import load_day, load_since_last, watermark
+from ingest.run import load_day, load_since_last, notify, watermark
 from ingest.split_batches import split
 from ingest.validate import CircuitBreakerError
 from tests.conftest import truncate
@@ -133,3 +133,9 @@ def test_since_last_fills_gap_left_by_out_of_order_load(engine, landing):
 
     load_since_last(engine, landing)
     assert _count(engine) == 15
+
+
+def test_notify_summarises_day(engine, landing):
+    load_day(engine, DAYS[0], landing)
+    message = notify(engine, DAYS[0])
+    assert "load=success" in message and "อ่าน 3" in message

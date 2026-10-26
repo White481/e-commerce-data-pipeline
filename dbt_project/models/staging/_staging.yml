@@ -1,0 +1,10 @@
+version: 2
+
+models:
+  - name: stg_online_retail
+    description: Typed and renamed invoice lines from raw.online_retail
+    columns:
+      - name: line_id
+        data_tests: [unique, not_null]
+      - name: invoice_day
+        data_tests: [not_null]

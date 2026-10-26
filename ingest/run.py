@@ -3,8 +3,9 @@
     python -m ingest.run init
     python -m ingest.run load --date 2011-01-05
     python -m ingest.run load --since-last
-    python -m ingest.run transform --date 2011-01-05
     python -m ingest.run notify --date 2011-01-05
+
+transform ทำด้วย dbt (dbt_project/) ไม่ได้อยู่ในไฟล์นี้
 """
 
 import argparse
@@ -18,20 +19,10 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from ingest.db import get_engine
-from ingest.load_raw import SQL_DIR, init_db, load_raw, record_skipped
+from ingest.load_raw import init_db, load_raw, record_skipped
 from ingest.validate import MAX_REJECT_RATE, CircuitBreakerError
 
 LANDING_DIR = Path(os.getenv("LANDING_DIR", "data/landing"))
-TRANSFORM_SQL = SQL_DIR / "transform_daily.sql"
-# มีไฟล์ data/.fail_transform_YYYY-MM-DD = จงใจให้ transform ของวันนั้นล้มหลังเขียนข้อมูล
-# แต่ก่อน commit (ใช้พิสูจน์ว่า retry / clear ไม่ทำข้อมูลซ้ำ)
-FAIL_FLAG_DIR = Path(os.getenv("FAIL_FLAG_DIR", "data"))
-
-
-def fail_flag(day: date) -> Path:
-    return FAIL_FLAG_DIR / f".fail_transform_{day:%Y-%m-%d}"
-
-
 def landing_file(day: date, landing_dir: Path = LANDING_DIR) -> Path:
     return landing_dir / f"{day:%Y-%m-%d}.csv"
 
@@ -116,24 +107,8 @@ def load_since_last(
     return results
 
 
-def transform_day(engine: Engine, day: date) -> int:
-    """สร้าง mart ของวันนั้นใหม่จาก raw ใน transaction เดียว คืนจำนวนแถว fact ของวันนั้น"""
-    params = {"day": day, "next_day": day + timedelta(days=1)}
-    statements = [s for s in TRANSFORM_SQL.read_text().split(";") if s.strip()]
-    with engine.begin() as conn:
-        for statement in statements:
-            conn.execute(text(statement), params)
-        if fail_flag(day).exists():
-            raise RuntimeError(f"injected failure ({fail_flag(day)} exists) — rolling back")
-        rows = conn.execute(
-            text("SELECT count(*) FROM mart.fact_sales WHERE date_key = :day"), params
-        ).scalar()
-    print(f"{day}: mart.fact_sales {rows} แถว")
-    return rows
-
-
 def notify(engine: Engine, day: date) -> str:
-    """สรุปผลของวันจาก audit + mart (ตอนนี้แค่ print ให้ไปอยู่ใน task log)"""
+    """สรุปผลของวันจาก audit + marts.fact_sales ของ dbt (ตอนนี้แค่ print ให้ไปอยู่ใน task log)"""
     with engine.connect() as conn:
         run = conn.execute(text("""
             SELECT status, rows_read, rows_rejected, rows_inserted, rows_updated
@@ -141,10 +116,12 @@ def notify(engine: Engine, day: date) -> str:
             WHERE pipeline = 'load_raw' AND batch_date = :day
             ORDER BY run_id DESC LIMIT 1
         """), {"day": day}).one_or_none()
-        fact_rows, revenue = conn.execute(text("""
-            SELECT count(*), coalesce(sum(total_amount), 0)
-            FROM mart.fact_sales WHERE date_key = :day
-        """), {"day": day}).one()
+        fact_rows, revenue = 0, 0
+        if conn.execute(text("SELECT to_regclass('marts.fact_sales')")).scalar():
+            fact_rows, revenue = conn.execute(text("""
+                SELECT count(*), coalesce(sum(total_amount), 0)
+                FROM marts.fact_sales WHERE date_key = :day
+            """), {"day": day}).one()
     if run is None:
         message = f"{day}: ไม่มีบันทึกการโหลด"
     else:
@@ -170,9 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         "--max-reject-rate", type=float, default=MAX_REJECT_RATE,
         help="เพดานแถวเสีย (default 0.05) ใช้ override เฉพาะวันที่ตรวจแล้ว",
     )
-    for name in ("transform", "notify"):
-        cmd = sub.add_parser(name)
-        cmd.add_argument("--date", type=date.fromisoformat, required=True)
+    notify_cmd = sub.add_parser("notify")
+    notify_cmd.add_argument("--date", type=date.fromisoformat, required=True)
     args = parser.parse_args(argv)
 
     engine = get_engine()
@@ -181,9 +157,6 @@ def main(argv: list[str] | None = None) -> int:
         print("init เสร็จ")
         return 0
 
-    if args.command == "transform":
-        transform_day(engine, args.date)
-        return 0
     if args.command == "notify":
         notify(engine, args.date)
         return 0
