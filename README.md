@@ -72,7 +72,7 @@ setup → ingest → transform → notify
 |---|---|---|
 | setup | `ingest.run init` | `CREATE ... IF NOT EXISTS` only |
 | ingest | `ingest.run load --date {{ ds }}` | upsert by `line_id` + replace that day; no file → `skipped`, exit 0 |
-| transform | `ingest.run transform --date {{ ds }}` | one transaction: dims `ON CONFLICT DO NOTHING`, fact rows of that day deleted and re-inserted |
+| transform | `dbt build --vars '{"run_date": "{{ ds }}"}'` | dims rebuilt as tables; `fact_sales` incremental `delete+insert` on that day's `date_key` (Phase 4) |
 | notify | `ingest.run notify --date {{ ds }}` | read-only summary in the task log |
 
 `catchup=True`, `retries=2`, `max_active_runs=1`, classic daily data intervals
@@ -86,9 +86,37 @@ reloaded (35,007); days without a file were `skipped` and stayed green. Mart vs 
 processed day: rows and revenue match, 0 duplicate `line_id`s. Failure test: forced `transform`
 for 2011-01-05 to fail after writing (all 3 tries failed, rolled back), removed the flag, cleared
 the task — the day still has exactly 1,117 fact rows / 28,150.40 before, after the failure, and
-after the re-run.
+after the re-run. (That test used the Phase 5 SQL transform, since replaced by dbt.)
 
 ![Airflow Graph view: setup → ingest → transform → notify](docs/airflow_graph.png)
+
+## Transformations with dbt (Phase 4)
+
+`dbt_project/` builds the star schema from `raw.online_retail` into two schemas:
+`staging.stg_online_retail` (view) → `marts.dim_customer`, `marts.dim_product`, `marts.dim_date`
+(tables) and `marts.fact_sales` (incremental, one row per invoice line with a customer).
+`profiles.yml` reads the same `POSTGRES_*` env vars as the Python code — no credentials in the repo.
+
+- 24 tests: `unique` / `not_null` on every key, `relationships` from the fact to each dim,
+  `accepted_values` on weekday and `is_return`, plus a singular reconciliation test: every day in
+  the fact must match staging on row count and revenue.
+- `fact_sales` replaces one day at a time (`delete+insert` on `date_key`): running
+  `dbt build --vars '{"run_date": "2011-01-05"}'` twice leaves 1,117 rows for that day both times.
+
+![dbt lineage graph: raw.online_retail → stg_online_retail → dims and fact_sales](docs/dbt_lineage.png)
+
+**Reconciliation against the original Phase 0 tables**
+
+| Table | Phase 0 (`public`) | dbt (`marts`) | Why they differ |
+|---|---|---|---|
+| fact_sales rows | 406,829 | 406,789 | 40 zero-price rows rejected by validation (Phase 2) |
+| fact_sales revenue | 8,300,065.81 | 8,300,065.81 | — (zero-price rows add nothing) |
+| dim_customer | 4,372 | 4,371 | customer 13256 only ever had zero-price lines |
+| dim_product | 3,684 | 3,938 | dbt includes 254 products sold only to guests (no customer id) |
+| dim_date | 305 | 305 | — |
+
+The old table seemed to hold 44 zero-price rows, but 4 of them were 0.001 rounded to 0.00 by
+`NUMERIC(10,2)`; dbt keeps the raw precision.
 
 ## Setup
 
@@ -120,6 +148,10 @@ make load-raw
 make split                      # data/landing/YYYY-MM-DD.csv, one file per day
 make load-day DATE=2011-01-05   # one day; a missing file is recorded as "skipped"
 make load-since-last            # catch up from the watermark (re-loads the watermark day)
+
+# dbt (Phase 4)
+make dbt-build
+make dbt-docs                   # lineage graph at http://localhost:8081
 
 # Airflow (Phase 5) — UI at http://localhost:8080 (local only, no login)
 make airflow-up

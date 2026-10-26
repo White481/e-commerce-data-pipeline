@@ -1,6 +1,7 @@
 """Daily e-commerce pipeline: setup → ingest → transform → notify
 
-ทุก task เรียก CLI เดียวกับที่ใช้รันมือ (python -m ingest.run ...) ผ่าน venv แยกของ pipeline
+ทุก task เรียกคำสั่งเดียวกับที่ใช้รันมือ ผ่าน venv แยกของ pipeline:
+ingest = python -m ingest.run, transform = dbt build (fact_sales แทนที่เฉพาะวันนั้น)
 แต่ละ task idempotent จึง retry / clear / backfill ซ้ำได้โดยข้อมูลไม่ซ้ำ
 
 Airflow 3.3: DAG มาจาก airflow.sdk, BashOperator ย้ายไป providers.standard
@@ -13,6 +14,7 @@ from airflow.sdk import DAG, Param
 from airflow.timetables.interval import CronDataIntervalTimetable
 
 PYTHON = "/opt/pipeline-venv/bin/python -m ingest.run"
+DBT = "/opt/pipeline-venv/bin/dbt"
 PROJECT_DIR = "/opt/project"
 
 with DAG(
@@ -47,7 +49,11 @@ with DAG(
     )
 
     transform = BashOperator(
-        task_id="transform", bash_command=f"{PYTHON} transform --date {{{{ ds }}}}"
+        task_id="transform",
+        bash_command=(
+            f"{DBT} build --project-dir dbt_project --profiles-dir dbt_project "
+            """--vars '{"run_date": "{{ ds }}"}'"""
+        ),
     )
 
     notify = BashOperator(task_id="notify", bash_command=f"{PYTHON} notify --date {{{{ ds }}}}")
