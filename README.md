@@ -103,6 +103,8 @@ after the re-run. (That test used the Phase 5 SQL transform, since replaced by d
 - `fact_sales` replaces one day at a time (`delete+insert` on `date_key`): running
   `dbt build --vars '{"run_date": "2011-01-05"}'` twice leaves 1,117 rows for that day both times.
 
+![dbt lineage graph: raw.online_retail → stg_online_retail → dims and fact_sales](docs/dbt_lineage.png)
+
 **Reconciliation against the original Phase 0 tables**
 
 | Table | Phase 0 (`public`) | dbt (`marts`) | Why they differ |
