@@ -147,3 +147,11 @@ Revenue total (`sum(quantity * unit_price)`) was 9,747,747.93 before and after.
 - `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>` matters: dbt drops and re-creates mart tables on
   every build, and plain `GRANT SELECT ON ALL TABLES` would only cover the tables that existed then.
 - Stopped Airflow while running Metabase: Docker has 4 GB and Metabase's JVM alone wants ~1 GB.
+
+## Git / GitHub workflow
+
+- **Stacked PRs merged into the wrong branches.** PRs #2–#6 were stacked (each based on the
+  previous phase's branch). #2 went into `main`, but its branch wasn't deleted, so GitHub didn't
+  retarget #3 — #3, #4 and #6 merged into their base branches instead of `main`. Nothing was lost
+  (the last branch held everything); retargeted the open PR to `main` and merged once.
+  Lesson: after merging a stacked PR, delete its branch, and check "into main" before the next merge.
