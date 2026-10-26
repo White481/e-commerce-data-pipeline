@@ -31,6 +31,7 @@ jobs:
       POSTGRES_DB: ecommerce
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
+      METABASE_RO_PASSWORD: ci-ro
 
     steps:
       - uses: actions/checkout@v5
@@ -75,4 +76,25 @@ jobs:
               """)).one()
           print(f"fact_sales={fact} staging_with_customer={stg}")
           assert fact == stg and fact > 0
+          PY
+
+      - name: Read-only BI role can read marts but nothing else
+        run: |
+          python -m ingest.roles
+          python - <<'PY'
+          from sqlalchemy import create_engine, text
+          from sqlalchemy.exc import ProgrammingError
+          from ingest.db import get_engine
+          ro = create_engine(get_engine().url.set(username="metabase_ro", password="ci-ro"))
+          with ro.connect() as conn:
+              print("marts.fact_sales rows:", conn.execute(text("SELECT count(*) FROM marts.fact_sales")).scalar())
+              for sql in ("SELECT 1 FROM raw.online_retail LIMIT 1", "DELETE FROM marts.fact_sales"):
+                  try:
+                      conn.execute(text(sql))
+                  except ProgrammingError as exc:
+                      assert "permission denied" in str(exc)
+                      conn.rollback()
+                  else:
+                      raise AssertionError(f"metabase_ro was allowed: {sql}")
+          print("metabase_ro: read marts only ✓")
           PY

@@ -130,6 +130,25 @@ Postgres 16 service container, on Python 3.12 (the same as the Airflow image):
 4. `dbt build` — all models and tests
 5. `dbt build` again for one day, then assert `fact_sales` still matches staging (idempotency)
 
+## BI: Metabase + read-only role (Phase 7)
+
+Metabase `v0.64.1` runs in `docker-compose.yml` (its own `metabase` database on the same Postgres).
+It connects as **`metabase_ro`**, a login role that can only `SELECT` from the `marts` schema:
+no access to `raw`, `audit` or `staging`, no writes. `ALTER DEFAULT PRIVILEGES` keeps tables that
+dbt re-creates readable. `python -m ingest.roles` sets it up (re-runnable); tests and CI check
+that it can read marts and is denied on `raw` and on `DELETE`.
+
+`python -m metabase.setup_dashboard` builds the dashboard through the Metabase API (admin user,
+database connection, 5 native-SQL questions, layout), so it's reproducible instead of hand-clicked:
+
+| Chart | Result (full data) |
+|---|---|
+| Monthly revenue | 13 months, Dec 2010 → Dec 2011 (Dec 2011 partial, to the 9th) |
+| Repeat customer rate | 65.6% of customers placed more than one order |
+| Top 10 products by revenue | #1 REGENCY CAKESTAND 3 TIER — 132,870.40 |
+| Top 10 countries by revenue | #1 United Kingdom — 6,767,873.39 |
+| Monthly return rate | returns as % of sales value, per month |
+
 ## Setup
 
 Requires Python 3.11+ (pandas 3.x) and Docker.
@@ -168,6 +187,11 @@ make dbt-docs                   # lineage graph at http://localhost:8081
 # Airflow (Phase 5) — UI at http://localhost:8080 (local only, no login)
 make airflow-up
 make backfill FROM=2011-01-01 TO=2011-01-31
+
+# Metabase (Phase 7) — http://localhost:3000, admin login from .env
+make roles
+make metabase-up
+make metabase-setup
 
 # 5. Business analysis queries: see analyses/analysis_queries.sql
 ```
