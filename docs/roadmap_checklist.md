@@ -2,25 +2,25 @@
 
 ## สถานะตอนนี้
 
-ทำเสร็จถึง Phase 5 แล้ว กำลังทำ Phase 4 (dbt) ส่วน `main` ยังมีแค่ Phase 0 เพราะ PR #2–#5 ยังไม่ได้ merge ลำดับทำงานตาม roadmap คือ 0 → 1 → 2 → 3 → 5 → 4 → 6 → 7 → 9 (Airflow มาก่อน dbt เพราะ dbt ต้องเสียบเข้า DAG)
+ทำครบทุก phase แล้ว Phase 0–7 อยู่ใน `main` เหลือ merge PR ของ Phase 9 และฝึกตอบคำถามสัมภาษณ์ ลำดับทำงานตาม roadmap คือ 0 → 1 → 2 → 3 → 5 → 4 → 6 → 7 → 9 (Airflow มาก่อน dbt เพราะ dbt ต้องเสียบเข้า DAG)
 
 | Phase | เรื่อง | Status | PR |
 | --- | --- | --- | --- |
 | 0 | วางรากฐาน | Merged | #1 |
-| 1 | โหลดซ้ำได้ + บันทึก audit | Done, PR open | #2 |
-| 2 | คุณภาพข้อมูล | Done, PR open | #3 |
-| 3 | โหลดทีละวัน | Done, PR open | #4 |
-| 5 | Airflow | Done, PR open | #5 |
-| 4 | dbt | In progress | — |
-| 6 | CI | Not started | — |
-| 7 | Dashboard Metabase + สิทธิ์อ่านอย่างเดียว | Not started | — |
-| 9 | README + เรซูเม่ | Not started | — |
+| 1 | โหลดซ้ำได้ + บันทึก audit | Merged | #2 |
+| 2 | คุณภาพข้อมูล | Merged | #3 |
+| 3 | โหลดทีละวัน | Merged | #4 |
+| 5 | Airflow | Merged | #5 |
+| 4 | dbt | Merged | #6 |
+| 6 | CI | Merged | #7 |
+| 7 | Dashboard Metabase + สิทธิ์อ่านอย่างเดียว | Merged | #8 |
+| 9 | README + เรซูเม่ | Done, PR open | #9 |
 
 **ทำต่อทันที**
 
-- [ ] Merge PR #2 → #3 → #4 → #5 ตามลำดับ และกด Delete branch หลัง merge แต่ละอัน
-- [ ] หลัง merge ครบ รัน `git checkout main && git pull`
-- [ ] เปิด Postgres (`docker compose up -d postgres`) เพื่อรัน dbt ต่อ
+- [x] Merge PR ของ Phase 1–7 เข้า `main`
+- [ ] Merge PR ของ Phase 9
+- [ ] ฝึกตอบคำถามใน `docs/interview_prep.md`
 
 ## Phase 0: วางรากฐาน
 
@@ -84,34 +84,34 @@
 - [x] `profiles.yml` อ่านค่าเชื่อมต่อจาก env (`dbt debug` ผ่าน)
 - [x] เขียน `stg_online_retail` → `dim_customer`, `dim_product`, `dim_date`, `fact_sales` (incremental)
 - [x] เขียน tests: unique, not_null, relationships, accepted_values
-- [ ] `dbt build` ผ่านครบ
-- [ ] Reconciliation: เทียบยอดรวม total_amount และจำนวนแถวกับตารางเดิม และอธิบายส่วนต่าง
-- [ ] แคปภาพ lineage graph (`dbt docs generate` + `dbt docs serve`)
-- [ ] เปลี่ยน task transform ใน DAG เป็น `dbt build`
-- [ ] เปิด PR ของ Phase 4
+- [x] `dbt build` ผ่านครบ
+- [x] Reconciliation: เทียบยอดรวม total_amount และจำนวนแถวกับตารางเดิม และอธิบายส่วนต่าง
+- [x] แคปภาพ lineage graph (`dbt docs generate` + `dbt docs serve`)
+- [x] เปลี่ยน task transform ใน DAG เป็น `dbt build`
+- [x] เปิด PR ของ Phase 4
 
 ## Phase 6: CI ตรวจโค้ดอัตโนมัติ
 
-- [ ] สร้าง `.github/workflows/ci.yml` จาก roadmap
-- [ ] push แล้วขึ้นเครื่องหมายเขียว
-- [ ] ใส่ badge ใน README
+- [x] สร้าง `.github/workflows/ci.yml` จาก roadmap
+- [x] push แล้วขึ้นเครื่องหมายเขียว
+- [x] ใส่ badge ใน README
 
 ## Phase 7: Dashboard Metabase + สิทธิ์อ่านอย่างเดียว
 
-- [ ] เพิ่ม Metabase ใน `docker-compose.yml`
-- [ ] สร้าง role `analyst_ro` ที่ทำได้แค่ SELECT บน schema marts
-- [ ] กราฟรายได้รายเดือน
-- [ ] กราฟสินค้าขายดี
-- [ ] กราฟประเทศที่ขายได้มากที่สุด
-- [ ] กราฟอัตราการคืนสินค้า (return rate)
-- [ ] กราฟลูกค้าที่กลับมาซื้อซ้ำ (repeat customer)
+- [x] เพิ่ม Metabase ใน `docker-compose.yml`
+- [x] สร้าง role อ่านอย่างเดียวที่ทำได้แค่ SELECT บน schema marts (ใช้ชื่อ `metabase_ro` เพราะ `analyst_ro` เป็นของ agent)
+- [x] กราฟรายได้รายเดือน
+- [x] กราฟสินค้าขายดี
+- [x] กราฟประเทศที่ขายได้มากที่สุด
+- [x] กราฟอัตราการคืนสินค้า (return rate)
+- [x] กราฟลูกค้าที่กลับมาซื้อซ้ำ (repeat customer)
 
 ## Phase 9: README + เรซูเม่
 
 ตัวเลขจริงที่ใช้ได้แล้ว: 541,909 แถวดิบ, ปฏิเสธ 0.46%, โหลดทีละวัน 305 วัน, backfill 31 วัน
 
-- [ ] เขียน README ตามโครง 9 หัวข้อใน roadmap
-- [ ] ส่วน What I ran into (ดึงจาก NOTES.md)
-- [ ] ส่วน Limitations (เช่น line_id ขึ้นกับลำดับแถวในไฟล์ต้นทาง)
-- [ ] เขียน resume bullet ด้วยตัวเลขจริง
-- [ ] ฝึกตอบคำถาม 10 ข้อในหัวข้อ 6 ของ roadmap ด้วยคำพูดตัวเอง
+- [x] เขียน README ตามโครง 9 หัวข้อใน roadmap
+- [x] ส่วน What I ran into (ดึงจาก NOTES.md)
+- [x] ส่วน Limitations (เช่น line_id ขึ้นกับลำดับแถวในไฟล์ต้นทาง)
+- [x] เขียน resume bullet ด้วยตัวเลขจริง
+- [ ] ฝึกตอบคำถาม 10 ข้อด้วยคำพูดตัวเอง (`docs/interview_prep.md`)

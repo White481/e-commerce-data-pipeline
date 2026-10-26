@@ -1,226 +1,194 @@
+# E-commerce Data Pipeline
+
 [![CI](https://github.com/White481/e-commerce-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/White481/e-commerce-data-pipeline/actions/workflows/ci.yml)
 
-**Stack:** Python, pandas, PostgreSQL 16, Docker, SQLAlchemy, SQL
+A daily batch pipeline for the UCI Online Retail dataset (541,909 invoice lines, Dec 2010 – Dec 2011):
+validated, idempotent loads into Postgres, a dbt star schema, Airflow orchestration with backfills,
+CI against a real database, and a Metabase dashboard on a read-only role. Everything runs locally
+with Docker.
 
-## Data Model (Star Schema)
+**Stack:** Python 3.12/3.14 · pandas · pandera · PostgreSQL 16 · dbt 1.12 · Airflow 3.3 · Metabase 0.64 · Docker Compose · GitHub Actions
 
-- `fact_sales` — central table storing every transaction
-- `dim_customer` — customer info + country
-- `dim_product` — product details
-- `dim_date` — calendar table, broken down by year/month/day/weekday
+## 1. Results at a glance
 
-A star schema was chosen because it's the standard data warehouse pattern 
-that makes business analysis queries (revenue, top products) fast and easy to read.
-
-## Data Quality Decisions
-
-While cleansing the data, I found two issues that required a deliberate decision on how to handle them:
-
-1. **CustomerID missing in ~25% of rows** — decided to drop these rows, since per-customer 
-   analysis isn't possible without knowing who made the purchase. Hypothesis: the point-of-sale 
-   system may allow guest checkout without requiring login.
-2. **Negative Quantity values (~10,600 rows)** — not an error, but **product returns**. 
-   Kept these rows and added an `is_return` flag column instead of discarding them, 
-   so return volume can still be analyzed separately.
-
-## Validation Rules (Phase 2)
-
-`ingest/validate.py` (pandera) runs before every load. Failing rows are **not** loaded;
-they go to `audit.rejected_rows` with a reason, and each run prints how many rows were
-read / rejected / loaded.
-
-| Rule | Rows rejected (full file) |
+| | |
 |---|---|
-| `unit_price <= 0` | 2,517 (0.46%) |
-| cancelled invoice (`C…`) with positive quantity | 0 |
-| `invoice_date` is null | 0 |
-| duplicate `line_id` | 0 |
+| Raw rows processed | 541,909 invoice lines, 25,900 invoices |
+| Rejected by validation | 2,517 rows (0.46%), each with a reason in `audit.rejected_rows` |
+| Loaded | 539,392 rows — identical whether loaded in one shot or as 305 daily files |
+| Re-run the same day | 0 rows inserted, 0 updated (idempotent) |
+| Airflow backfill | January 2011, 31/31 runs green; a forced mid-run failure left no duplicates |
+| dbt | 5 models, 24 tests + a reconciliation test, all passing |
+| Tests | 37 pytest tests (unit + DB integration), run in CI on every PR |
+| Dashboard | 5 charts on `marts`, read through a `SELECT`-only role |
 
-**Circuit breaker:** if more than 5% of a batch is rejected, the whole batch is stopped
-(nothing is loaded, the run is marked `failed`). That much bad data usually means a broken
-export, not a few bad rows.
+## 2. Architecture
 
-**Why missing `CustomerID` is not a validation rule:** it affects 24.9% of rows, so it would
-trip the circuit breaker on every batch. More importantly, it isn't invalid data — those are
-real sales (likely guest checkout) and they still count toward revenue and product totals.
-The raw layer keeps them; the per-customer filter stays in `clean_data.py` (and will move to
-the fact model in dbt), where it's a modelling choice rather than a data-quality failure.
+```mermaid
+flowchart LR
+    src["Online Retail.xlsx"] --> split["split_batches<br/>one CSV per day"]
+    split --> load["load_raw<br/>validate (pandera)"]
+    load -->|valid rows| raw[("raw.online_retail")]
+    load -->|rejected + reason| rej[("audit.rejected_rows")]
+    load -->|1 row per run| runs[("audit.pipeline_runs")]
+    raw --> stg["dbt: staging.stg_online_retail"]
+    stg --> marts[("marts: dim_customer · dim_product<br/>dim_date · fact_sales")]
+    marts --> mb["Metabase<br/>(metabase_ro)"]
 
-## Incremental Loading (Phase 3)
-
-- Each daily file is the full truth for that day: the load upserts by `line_id`, then deletes
-  that day's rows that are no longer in the file (rejected now, or removed at the source).
-- **Watermark** = latest day that actually has rows in `raw.online_retail` (not what the audit
-  log says ran), so deleted data is reloaded automatically. `--since-last` starts at the
-  watermark day — or at the first day that has a landing file but no rows, if that is earlier —
-  so an out-of-order load can't leave a gap.
-- **Reviewed overrides:** two real days exceed the 5% circuit breaker (2010-12-22: 22.0%,
-  2011-01-28: 5.1% — zero-price stock adjustments). After checking them, they were loaded with
-  `--max-reject-rate`. The approved rate is stored in `audit.pipeline_runs` and reused when
-  that day is reloaded, so the breaker doesn't block the same reviewed day again.
-- Loading all 305 daily files gives exactly the same result as the one-shot load:
-  539,392 rows, revenue 9,769,872.05.
-
-## Orchestration (Phase 5)
-
-`dags/ecommerce_daily.py` (Airflow 3.3.2, standalone in `docker-compose.yml`) runs one day per DAG run:
-
-```
-setup → ingest → transform → notify
+    subgraph airflow["Airflow DAG ecommerce_daily (one run per day)"]
+        direction LR
+        t1[setup] --> t2[ingest] --> t3["transform<br/>dbt build"] --> t4[notify]
+    end
 ```
 
-| Task | Command | Why it's safe to retry |
-|---|---|---|
-| setup | `ingest.run init` | `CREATE ... IF NOT EXISTS` only |
-| ingest | `ingest.run load --date {{ ds }}` | upsert by `line_id` + replace that day; no file → `skipped`, exit 0 |
-| transform | `dbt build --vars '{"run_date": "{{ ds }}"}'` | dims rebuilt as tables; `fact_sales` incremental `delete+insert` on that day's `date_key` (Phase 4) |
-| notify | `ingest.run notify --date {{ ds }}` | read-only summary in the task log |
-
-`catchup=True`, `retries=2`, `max_active_runs=1`, classic daily data intervals
-(`CronDataIntervalTimetable`) so the run with logical date 2011-01-05 processes 2011-01-05.
-Pipeline dependencies live in a separate venv inside the image (`/opt/pipeline-venv`) so pandas 3 /
-SQLAlchemy 2 don't fight Airflow's own pins. Reviewed circuit-breaker overrides can be passed as
-run conf: `{"max_reject_rate": 0.25}`.
-
-**Proof (January 2011 backfill):** 31/31 runs green; January raw rows deleted beforehand were
-reloaded (35,007); days without a file were `skipped` and stayed green. Mart vs raw for every
-processed day: rows and revenue match, 0 duplicate `line_id`s. Failure test: forced `transform`
-for 2011-01-05 to fail after writing (all 3 tries failed, rolled back), removed the flag, cleared
-the task — the day still has exactly 1,117 fact rows / 28,150.40 before, after the failure, and
-after the re-run. (That test used the Phase 5 SQL transform, since replaced by dbt.)
-
-![Airflow Graph view: setup → ingest → transform → notify](docs/airflow_graph.png)
-
-## Transformations with dbt (Phase 4)
-
-`dbt_project/` builds the star schema from `raw.online_retail` into two schemas:
-`staging.stg_online_retail` (view) → `marts.dim_customer`, `marts.dim_product`, `marts.dim_date`
-(tables) and `marts.fact_sales` (incremental, one row per invoice line with a customer).
-`profiles.yml` reads the same `POSTGRES_*` env vars as the Python code — no credentials in the repo.
-
-- 24 tests: `unique` / `not_null` on every key, `relationships` from the fact to each dim,
-  `accepted_values` on weekday and `is_return`, plus a singular reconciliation test: every day in
-  the fact must match staging on row count and revenue.
-- `fact_sales` replaces one day at a time (`delete+insert` on `date_key`): running
-  `dbt build --vars '{"run_date": "2011-01-05"}'` twice leaves 1,117 rows for that day both times.
-
-![dbt lineage graph: raw.online_retail → stg_online_retail → dims and fact_sales](docs/dbt_lineage.png)
-
-**Reconciliation against the original Phase 0 tables**
-
-| Table | Phase 0 (`public`) | dbt (`marts`) | Why they differ |
+| Layer | Schema | Built by | Purpose |
 |---|---|---|---|
-| fact_sales rows | 406,829 | 406,789 | 40 zero-price rows rejected by validation (Phase 2) |
-| fact_sales revenue | 8,300,065.81 | 8,300,065.81 | — (zero-price rows add nothing) |
-| dim_customer | 4,372 | 4,371 | customer 13256 only ever had zero-price lines |
-| dim_product | 3,684 | 3,938 | dbt includes 254 products sold only to guests (no customer id) |
-| dim_date | 305 | 305 | — |
+| Raw | `raw` | `ingest/load_raw.py` | Source rows that passed validation, keyed by `line_id` |
+| Audit | `audit` | `ingest/load_raw.py` | Every run (`pipeline_runs`) and every rejected row with its reason |
+| Staging | `staging` | dbt (view) | Typed, renamed columns + derived `total_amount`, `is_return` |
+| Marts | `marts` | dbt (tables) | Star schema for analysis and BI |
 
-The old table seemed to hold 44 zero-price rows, but 4 of them were 0.001 rounded to 0.00 by
-`NUMERIC(10,2)`; dbt keeps the raw precision.
+## 3. Data model
 
-## CI (Phase 6)
+**Grain of `fact_sales`: one invoice line with a known customer.** `(invoice_no, stock_code)` is
+*not* unique — 9,694 pairs repeat, up to 20 times in one invoice — so each line gets
+`line_id = <invoice_no>-<line_no>`, its position inside the invoice.
 
-`.github/workflows/ci.yml` runs on every push to `main` and every pull request, against a real
-Postgres 16 service container, on Python 3.12 (the same as the Airflow image):
+| Table | Key | Rows | Notes |
+|---|---|---|---|
+| `fact_sales` | `line_id` | 406,789 | incremental, replaced one day at a time (`delete+insert` on `date_key`) |
+| `dim_customer` | `customer_id` | 4,371 | first country seen per customer |
+| `dim_product` | `product_key = md5(stock_code)` | 3,938 | stable key across full rebuilds |
+| `dim_date` | `date_key` | 305 | year, month, day, weekday |
 
-1. `ruff check .`
-2. `pytest` — unit and DB integration tests; DB tests are not allowed to skip in CI
-3. load 3 real days through `ingest.run` (validation + audit included)
-4. `dbt build` — all models and tests
-5. `dbt build` again for one day, then assert `fact_sales` still matches staging (idempotency)
+![dbt lineage graph](docs/dbt_lineage.png)
 
-## BI: Metabase + read-only role (Phase 7)
+## 4. How it works
 
-Metabase `v0.64.1` runs in `docker-compose.yml` (its own `metabase` database on the same Postgres).
-It connects as **`metabase_ro`**, a login role that can only `SELECT` from the `marts` schema:
-no access to `raw`, `audit` or `staging`, no writes. `ALTER DEFAULT PRIVILEGES` keeps tables that
-dbt re-creates readable. `python -m ingest.roles` sets it up (re-runnable); tests and CI check
-that it can read marts and is denied on `raw` and on `DELETE`.
+**Ingest + validate** (`ingest/load_raw.py`, `ingest/validate.py`). Each batch is validated with
+pandera: `unit_price <= 0`, cancelled invoice (`C…`) with positive quantity, null date, duplicate
+`line_id`. Bad rows go to `audit.rejected_rows`; good rows are COPY'd into a temp table and merged
+with `INSERT … ON CONFLICT (line_id)` in **one transaction**, so a failed load changes nothing.
+A **circuit breaker** stops the whole batch if more than 5% is rejected.
 
-`python -m metabase.setup_dashboard` builds the dashboard through the Metabase API (admin user,
-database connection, 5 native-SQL questions, layout), so it's reproducible instead of hand-clicked:
+**Incremental loading** (`ingest/run.py`). `load --date YYYY-MM-DD` loads one daily file and
+replaces that day; a day without a file is recorded as `skipped` and exits 0. `load --since-last`
+starts from the **watermark** (the latest day that actually has rows) and re-loads that day too, or
+from the first gap if an out-of-order load left one.
 
-| Chart | Result (full data) |
-|---|---|
-| Monthly revenue | 13 months, Dec 2010 → Dec 2011 (Dec 2011 partial, to the 9th) |
-| Repeat customer rate | 65.6% of customers placed more than one order |
-| Top 10 products by revenue | #1 REGENCY CAKESTAND 3 TIER — 132,870.40 |
-| Top 10 countries by revenue | #1 United Kingdom — 6,767,873.39 |
-| Monthly return rate | returns as % of sales value, per month |
+**Transform** (`dbt_project/`). Staging view → star schema. Tests cover keys (`unique`,
+`not_null`), every fact→dim `relationship`, `accepted_values`, and a singular test that each day in
+the fact matches staging on row count and revenue.
 
-![Metabase dashboard: monthly revenue, repeat customer rate, top products, top countries, monthly return rate](docs/metabase_dashboard.png)
+**Orchestrate** (`dags/ecommerce_daily.py`). Airflow 3.3.2 runs `setup → ingest → transform →
+notify` per day with `catchup=True`, `retries=2`, `max_active_runs=1`. Every task is idempotent,
+so retries, clears and backfills never duplicate data.
 
-**Reading the return-rate spikes:** both are a single huge order cancelled the same day, not a
-wave of returns — 2011-01-18, customer 12346 ordered and cancelled 74,215 storage jars (77,183.60);
-2011-12-09, customer 16446 ordered and cancelled 80,995 "Paper Craft, Little Birdie" (168,469.60).
-December 2011 also only has data to the 9th, which inflates its rate further. Revenue nets these
-pairs out to zero, so the revenue chart is unaffected.
+![Airflow Graph view of one green run](docs/airflow_graph.png)
 
-## Setup
+**Serve** (`ingest/roles.py`, `metabase/setup_dashboard.py`). Metabase reads `marts` as
+`metabase_ro` (no access to `raw`/`audit`/`staging`, no writes). The dashboard is created through
+the Metabase API, so it is reproducible instead of hand-clicked.
 
-Requires Python 3.11+ (pandas 3.x) and Docker.
+![Metabase dashboard](docs/metabase_dashboard.png)
+
+- **Repeat customers:** 65.6% of customers ordered more than once.
+- **Top product:** REGENCY CAKESTAND 3 TIER (132,870.40). **Top market:** United Kingdom (6.77M, 81.5% of customer revenue).
+- **Return-rate spikes are single orders, not trends:** on 2011-01-18 and 2011-12-09 one customer
+  ordered and cancelled 74,215 and 80,995 units the same day. December 2011 also stops on the 9th.
+
+## 5. Design decisions
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| Upsert by `line_id` inside one transaction | Re-runs and retries are safe; partial loads are impossible | Needs a stable line id (see Limitations) |
+| A daily file replaces its whole day | Rows removed or newly rejected at the source disappear too, not only new rows added | One day is the smallest unit of reload |
+| Missing `CustomerID` is **not** a validation rule | 24.9% of rows are guest checkouts — real revenue. As a rule it would trip the 5% breaker on every batch | `fact_sales` (and the dashboard) covers customer sales only; guest sales, 15% of revenue, are in staging |
+| Circuit breaker with *reviewed* overrides | Stops a broken export, but 2 real days exceed 5% (zero-price stock adjustments) | An approved rate is stored in audit and reused, so a reviewed day isn't blocked again |
+| Watermark from the data, not the audit log | Deleted data is reloaded automatically | Needs the gap check so out-of-order loads can't skip days |
+| dbt incremental `delete+insert` per day | Same semantics as the loader, so Airflow retries stay idempotent | Dims are full rebuilds (cheap at this size) |
+| Pipeline deps in their own venv inside the Airflow image | pandas 3 / SQLAlchemy 2 don't collide with Airflow's pins | Two Python environments in one image |
+| One read-only role per consumer (`metabase_ro`) | Least privilege; one consumer's credentials can't break another | More roles to manage |
+
+**Reconciliation against the original v1 tables** (`public.*`, built by `clean_data.py` before this
+rework): revenue is identical at 8,300,065.81. The fact has 40 fewer rows (zero-price lines now
+rejected), `dim_customer` loses one customer who only had zero-price lines, and `dim_product` gains
+254 products sold only to guests.
+
+## 6. What I ran into
+
+Full log with numbers: [NOTES.md](NOTES.md). The ones worth knowing:
+
+- **The watermark skipped 22 days.** After `--since-last` stopped at a circuit-breaker day, I
+  loaded a later day by hand; the data-based watermark jumped past the gap and 32,781 rows were
+  never loaded. Fixed with a gap check, then reconciled: 539,392 rows, revenue 9,769,872.05.
+- **An approved override wasn't remembered.** `--since-last` re-loads the watermark day, so a
+  reviewed high-reject day tripped the breaker on every run and the pipeline was stuck.
+- **Airflow 3 changed the defaults.** `@daily` now gives a zero-length interval (switched to
+  `CronDataIntervalTimetable` so `{{ ds }}` is the processed day), backfills only run on *unpaused*
+  DAGs, and the UI's "reprocess completed" re-queued 28 green runs. Idempotent tasks made all of it
+  harmless.
+- **A test changed another project's password.** Postgres roles are server-wide; the roadmap's
+  `analyst_ro` already belonged to my Text-to-SQL agent. Restored it, renamed the BI role, and the
+  test now uses a throwaway role.
+- **Upsert never deletes.** Rows loaded before validation existed stayed in raw until the load also
+  removed rejected and vanished rows for the day.
+- **The DB password was in git history.** Moving it to `.env` doesn't remove old commits, so it was
+  rotated.
+
+## 7. Limitations and next steps
+
+- `line_id` depends on row order in the source file. A re-export in a different order would shift
+  ids; a real source system should provide a line id.
+- 5,268 rows are exact duplicates of another row. They are kept (they could be real repeat scans);
+  the source can't tell us which.
+- Single machine, local Docker, simple-auth Airflow and a no-login Airflow UI: fine for a demo,
+  not for production. Next would be managed Postgres, secrets in a vault, and alerting from `notify`.
+- Dimensions are rebuilt in full each run and customer country is "first seen" (no SCD history).
+- The dataset ends on 2011-12-09, so December 2011 is a partial month in every chart.
+
+## 8. Run it locally
+
+Requires Docker and Python 3.11+.
 
 ```bash
-# 0. Configure credentials (never commit .env)
-cp .env.example .env          # then edit the values
+cp .env.example .env               # fill in the passwords
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-# 1. Start Postgres
-make up
+make up                            # Postgres
+make split                         # data/landing/YYYY-MM-DD.csv
+make load-since-last               # validate + load every day; stops at a day over the 5% breaker
+make dbt-build                     # staging + marts + tests
+make test && make lint
 
-# 2. Create tables
-make create-tables
-
-# 3. Clean the raw data
-make clean-data
-
-# 4. Load into Postgres
-make load
-
-# Raw layer with validation + audit (Phase 1–2)
-make init-db
-make load-raw
-
-# Incremental daily loads (Phase 3)
-make split                      # data/landing/YYYY-MM-DD.csv, one file per day
-make load-day DATE=2011-01-05   # one day; a missing file is recorded as "skipped"
-make load-since-last            # catch up from the watermark (re-loads the watermark day)
-
-# dbt (Phase 4)
-make dbt-build
-make dbt-docs                   # lineage graph at http://localhost:8081
-
-# Airflow (Phase 5) — UI at http://localhost:8080 (local only, no login)
-make airflow-up
+make airflow-up                    # http://localhost:8080 — DAG starts paused
 make backfill FROM=2011-01-01 TO=2011-01-31
 
-# Metabase (Phase 7) — http://localhost:3000, admin login from .env
-make roles
-make metabase-up
-make metabase-setup
-
-# 5. Business analysis queries: see analyses/analysis_queries.sql
+make roles && make metabase-up     # http://localhost:3000
+make metabase-setup                # admin, connection, charts, dashboard
+make dbt-docs                      # lineage graph at http://localhost:8081
 ```
 
-Run the unit tests and linter with `make test` and `make lint`.
+Two real days exceed the breaker (2010-12-22 and 2011-01-28). After reviewing their rejected rows,
+load them with `python -m ingest.run load --date 2010-12-22 --max-reject-rate 0.25` (and `0.06`
+for 2011-01-28), then run `make load-since-last` again.
 
-> `make load` appends, so re-running it on a populated database fails on primary keys.
-> To start fresh: `docker compose down -v && make up && make create-tables && make load`.
+The v1 pipeline (`make create-tables && make clean-data && make load`) is kept for the
+reconciliation above; `analyses/analysis_queries.sql` runs against either schema
+(`SET search_path = marts;` for the dbt tables).
 
-## Business Insights
+## 9. Repository layout
 
-Full queries available in `analyses/analysis_queries.sql`, covering:
-- Monthly revenue trend
-- Top 10 best-selling products
-- Top 10 customers by spend
-- Monthly return volume
-
-## Lessons Learned
-
-- A Docker volume only sets the password at first creation — editing `docker-compose.yml` 
-  afterward has no effect if the volume already exists. Requires `docker compose down -v` to recreate.
-- `pandas.to_sql(if_exists="append")` will auto-create a table if it doesn't exist yet — 
-  this is risky because the table won't have the intended constraints (PK/FK). Schema management 
-  (SQL DDL) should be kept clearly separate from data loading (Python).
+```
+ingest/           load_raw, validate, run (CLI), split_batches, roles, db
+sql/init.sql      raw + audit schemas
+dbt_project/      staging and marts models, tests, profiles.yml (env-based)
+dags/             Airflow DAG
+airflow/          Airflow image (pipeline venv) + metadata DB init
+metabase/         dashboard-as-code via the Metabase API
+tests/            pytest: validation, idempotency, incremental, roles
+.github/workflows CI: lint, tests, real-data load, dbt build, role check
+docs/             screenshots, roadmap checklist
+NOTES.md          everything that went wrong, with numbers
+```
