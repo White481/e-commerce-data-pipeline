@@ -7,6 +7,9 @@ validated, idempotent loads into Postgres, a dbt star schema, Airflow orchestrat
 CI against a real database, and a Metabase dashboard on a read-only role. Everything runs locally
 with Docker.
 
+A separate project, **[e-commerce-ai-agent](https://github.com/White481/e-commerce-ai-agent)**,
+answers Thai/English questions over the same `marts` tables with an LLM, through its own read-only role.
+
 **Stack:** Python 3.12/3.14 · pandas · pandera · PostgreSQL 16 · dbt 1.12 · Airflow 3.3 · Metabase 0.64 · Docker Compose · GitHub Actions
 
 ## 1. Results at a glance
@@ -34,6 +37,7 @@ flowchart LR
     raw --> stg["dbt: staging.stg_online_retail"]
     stg --> marts[("marts: dim_customer · dim_product<br/>dim_date · fact_sales")]
     marts --> mb["Metabase<br/>(metabase_ro)"]
+    marts --> agent["Text-to-SQL agent<br/>(analyst_ro, separate repo)"]
 
     subgraph airflow["Airflow DAG ecommerce_daily (one run per day)"]
         direction LR
@@ -88,7 +92,9 @@ so retries, clears and backfills never duplicate data.
 
 **Serve** (`ingest/roles.py`, `metabase/setup_dashboard.py`). Metabase reads `marts` as
 `metabase_ro` (no access to `raw`/`audit`/`staging`, no writes). The dashboard is created through
-the Metabase API, so it is reproducible instead of hand-clicked.
+the Metabase API, so it is reproducible instead of hand-clicked. The
+[Text-to-SQL agent](https://github.com/White481/e-commerce-ai-agent) is a second consumer of
+`marts`, with its own `analyst_ro` role.
 
 ![Metabase dashboard](docs/metabase_dashboard.png)
 
@@ -129,7 +135,7 @@ Full log with numbers: [NOTES.md](NOTES.md). The ones worth knowing:
   DAGs, and the UI's "reprocess completed" re-queued 28 green runs. Idempotent tasks made all of it
   harmless.
 - **A test changed another project's password.** Postgres roles are server-wide; the roadmap's
-  `analyst_ro` already belonged to my Text-to-SQL agent. Restored it, renamed the BI role, and the
+  `analyst_ro` already belonged to my [Text-to-SQL agent](https://github.com/White481/e-commerce-ai-agent). Restored it, renamed the BI role, and the
   test now uses a throwaway role.
 - **Upsert never deletes.** Rows loaded before validation existed stayed in raw until the load also
   removed rejected and vanished rows for the day.
