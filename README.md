@@ -149,6 +149,14 @@ database connection, 5 native-SQL questions, layout), so it's reproducible inste
 | Top 10 countries by revenue | #1 United Kingdom — 6,767,873.39 |
 | Monthly return rate | returns as % of sales value, per month |
 
+![Metabase dashboard: monthly revenue, repeat customer rate, top products, top countries, monthly return rate](docs/metabase_dashboard.png)
+
+**Reading the return-rate spikes:** both are a single huge order cancelled the same day, not a
+wave of returns — 2011-01-18, customer 12346 ordered and cancelled 74,215 storage jars (77,183.60);
+2011-12-09, customer 16446 ordered and cancelled 80,995 "Paper Craft, Little Birdie" (168,469.60).
+December 2011 also only has data to the 9th, which inflates its rate further. Revenue nets these
+pairs out to zero, so the revenue chart is unaffected.
+
 ## Setup
 
 Requires Python 3.11+ (pandas 3.x) and Docker.
