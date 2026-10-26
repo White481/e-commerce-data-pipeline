@@ -41,6 +41,42 @@ services:
       - .:/opt/project
       - airflow_home:/opt/airflow/logs
 
+  # สร้าง database 'metabase' (เก็บ dashboard / ผู้ใช้ของ Metabase) ถ้ายังไม่มี แล้วจบ
+  metabase-db-init:
+    image: postgres:16
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      PGHOST: postgres
+      PGPASSWORD: ${POSTGRES_PASSWORD}
+    command: >-
+      sh -c "psql -U $$POSTGRES_USER -d $$POSTGRES_DB -tAc \"SELECT 1 FROM pg_database WHERE datname = 'metabase'\" | grep -q 1
+      || psql -U $$POSTGRES_USER -d $$POSTGRES_DB -c 'CREATE DATABASE metabase'"
+
+  metabase:
+    image: metabase/metabase:v0.64.1
+    container_name: ecommerce_metabase
+    depends_on:
+      metabase-db-init:
+        condition: service_completed_successfully
+    environment:
+      MB_DB_TYPE: postgres
+      MB_DB_HOST: postgres
+      MB_DB_PORT: "5432"
+      MB_DB_DBNAME: metabase
+      MB_DB_USER: ${POSTGRES_USER}
+      MB_DB_PASS: ${POSTGRES_PASSWORD}
+      JAVA_OPTS: -Xmx1g
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:3000/api/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+
 volumes:
   pgdata:
   airflow_home:

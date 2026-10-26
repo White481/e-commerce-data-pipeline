@@ -1,4 +1,4 @@
-.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last airflow-up backfill dbt-build dbt-docs test lint
+.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last airflow-up backfill dbt-build dbt-docs roles metabase-up metabase-setup test lint
 
 up:
 	docker compose up -d
@@ -49,6 +49,15 @@ dbt-build:
 dbt-docs:  # http://localhost:8081
 	$(DBT) docs generate --project-dir dbt_project --profiles-dir dbt_project
 	$(DBT) docs serve --project-dir dbt_project --profiles-dir dbt_project --port 8081
+
+roles:  # metabase_ro: SELECT on marts only
+	python -m ingest.roles
+
+metabase-up:  # http://localhost:3000
+	docker compose up -d metabase
+
+metabase-setup:  # admin + database + 5 charts + dashboard (re-runnable)
+	python -m metabase.setup_dashboard
 
 test:
 	pytest -q

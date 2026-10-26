@@ -128,3 +128,22 @@ Revenue total (`sum(quantity * unit_price)`) was 9,747,747.93 before and after.
 - The first `dbt build` died mid-test: Docker was stopped while it ran. Not a dbt problem.
 - Removed the Phase 5 SQL transform (`sql/mart.sql`, `sql/transform_daily.sql`) so only dbt builds
   the marts. The old `mart` schema is still in the local database until dropped.
+
+## Phase 6 — CI
+
+- First run green. DB tests skip locally when Postgres is down — fine on a laptop, but in CI that
+  would hide them, so `conftest.py` fails instead of skipping when `CI` is set.
+- CI runs Python 3.12 (the Airflow image's version), not the laptop's 3.14.
+
+## Phase 7 — Metabase + read-only role
+
+- **Collided with an existing role.** The roadmap says `analyst_ro`, but that role already existed
+  for my Text-to-SQL agent (another worktree, same Postgres server). Postgres roles are
+  server-wide, so my test changed its password. Restored it with the agent's own role script,
+  renamed the BI role to `metabase_ro`, and made the test use a throwaway role it drops afterwards.
+  Lesson: check `pg_roles` before picking a role name; one role per consumer.
+- Metabase setup is a script against its API, not clicks — re-runnable, and it also runs every
+  chart's query once through the read-only role to prove the grants work.
+- `ALTER DEFAULT PRIVILEGES FOR ROLE <owner>` matters: dbt drops and re-creates mart tables on
+  every build, and plain `GRANT SELECT ON ALL TABLES` would only cover the tables that existed then.
+- Stopped Airflow while running Metabase: Docker has 4 GB and Metabase's JVM alone wants ~1 GB.
