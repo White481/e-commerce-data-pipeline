@@ -1,3 +1,4 @@
+[![CI](https://github.com/White481/e-commerce-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/White481/e-commerce-data-pipeline/actions/workflows/ci.yml)
 
 **Stack:** Python, pandas, PostgreSQL 16, Docker, SQLAlchemy, SQL
 
@@ -117,6 +118,17 @@ after the re-run. (That test used the Phase 5 SQL transform, since replaced by d
 
 The old table seemed to hold 44 zero-price rows, but 4 of them were 0.001 rounded to 0.00 by
 `NUMERIC(10,2)`; dbt keeps the raw precision.
+
+## CI (Phase 6)
+
+`.github/workflows/ci.yml` runs on every push to `main` and every pull request, against a real
+Postgres 16 service container, on Python 3.12 (the same as the Airflow image):
+
+1. `ruff check .`
+2. `pytest` — unit and DB integration tests; DB tests are not allowed to skip in CI
+3. load 3 real days through `ingest.run` (validation + audit included)
+4. `dbt build` — all models and tests
+5. `dbt build` again for one day, then assert `fact_sales` still matches staging (idempotency)
 
 ## Setup
 
