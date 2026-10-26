@@ -110,3 +110,21 @@ Revenue total (`sum(quantity * unit_price)`) was 9,747,747.93 before and after.
   `line_id`). Fixed with `airflow backfill create ... --reprocess-behavior failed` → 31/31 green.
   Lesson: in Airflow 3 the backfill banner's ■ *cancels* the backfill, and "reprocess completed"
   re-runs days that already succeeded.
+
+## Phase 4 — dbt
+
+- `pip install dbt-postgres` pulled a **beta** `dbt-core` (1.13.0b1). Pinned `dbt-core==1.12.6`
+  + `dbt-postgres==1.11.0`.
+- dbt doesn't read `.env`; `profiles.yml` uses `env_var()` and the Makefile sources `.env` first.
+  In Airflow the same vars come from docker-compose (`POSTGRES_HOST=postgres`).
+- Default schema naming would give `analytics_staging` / `analytics_marts`; a
+  `generate_schema_name` macro keeps them as `staging` / `marts`.
+- `fact_sales` incremental with `unique_key='date_key'` + `delete+insert` = replace the whole day,
+  same semantics as the Phase 5 SQL transform, so retries and backfills stay idempotent.
+- `dim_product.product_key = md5(stock_code)` instead of SERIAL: stable across full rebuilds.
+- Reconciliation vs Phase 0: 406,829 → 406,789 fact rows (40 zero-price rows rejected), revenue
+  identical at 8,300,065.81. The old table's "44 zero-price rows" included 4 rows of 0.001 that
+  `NUMERIC(10,2)` had rounded to 0.00.
+- The first `dbt build` died mid-test: Docker was stopped while it ran. Not a dbt problem.
+- Removed the Phase 5 SQL transform (`sql/mart.sql`, `sql/transform_daily.sql`) so only dbt builds
+  the marts. The old `mart` schema is still in the local database until dropped.
