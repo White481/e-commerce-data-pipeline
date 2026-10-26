@@ -20,7 +20,7 @@ from ingest.validate import MAX_REJECT_RATE, check_reject_rate, validate
 PIPELINE = "load_raw"
 SOURCE_FILE = "data/Online Retail.xlsx"
 SQL_DIR = Path(__file__).resolve().parent.parent / "sql"
-INIT_SQL = [SQL_DIR / "init.sql", SQL_DIR / "mart.sql"]
+INIT_SQL = SQL_DIR / "init.sql"
 
 COLUMNS = [
     "line_id", "invoice_no", "line_no", "stock_code", "description",
@@ -50,8 +50,7 @@ FROM upserted
 
 def init_db(engine: Engine) -> None:
     with engine.begin() as conn:
-        for path in INIT_SQL:
-            conn.exec_driver_sql(path.read_text())
+        conn.exec_driver_sql(INIT_SQL.read_text())
 
 
 def prepare(df: pd.DataFrame, source_file: str) -> pd.DataFrame:

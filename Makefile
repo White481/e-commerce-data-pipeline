@@ -1,4 +1,4 @@
-.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last airflow-up backfill test lint
+.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last airflow-up backfill dbt-build dbt-docs test lint
 
 up:
 	docker compose up -d
@@ -39,6 +39,16 @@ airflow-up:  # UI: http://localhost:8080
 backfill:  # make backfill FROM=2011-01-01 TO=2011-01-31 (DAG ต้อง unpause ก่อน run ถึงจะเริ่ม)
 	docker compose exec airflow airflow backfill create --dag-id ecommerce_daily \
 		--from-date $(FROM) --to-date $(TO) --max-active-runs 1
+
+# dbt ไม่อ่าน .env เอง จึงโหลดเข้า env ก่อน
+DBT = set -a && . ./.env && set +a && dbt
+
+dbt-build:
+	$(DBT) build --project-dir dbt_project --profiles-dir dbt_project
+
+dbt-docs:  # http://localhost:8081
+	$(DBT) docs generate --project-dir dbt_project --profiles-dir dbt_project
+	$(DBT) docs serve --project-dir dbt_project --profiles-dir dbt_project --port 8081
 
 test:
 	pytest -q
