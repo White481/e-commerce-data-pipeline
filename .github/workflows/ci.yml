@@ -32,6 +32,11 @@ jobs:
       POSTGRES_HOST: localhost
       POSTGRES_PORT: "5432"
       METABASE_RO_PASSWORD: ci-ro
+      # landing zone อยู่บน S3-compatible storage (RustFS) เหมือนในเครื่อง
+      AWS_ACCESS_KEY_ID: ci-lake-key
+      AWS_SECRET_ACCESS_KEY: ci-lake-secret
+      S3_ENDPOINT_URL: http://localhost:9000
+      LANDING_URI: s3://ecommerce-lake/landing
 
     steps:
       - uses: actions/checkout@v5
@@ -48,11 +53,19 @@ jobs:
       - name: Lint
         run: ruff check .
 
+      # service container ตั้ง command ไม่ได้ จึงเปิด RustFS ด้วย docker run เอง
+      - name: Start S3-compatible data lake (RustFS)
+        run: |
+          docker run -d --name lake -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY="$AWS_ACCESS_KEY_ID" -e RUSTFS_SECRET_KEY="$AWS_SECRET_ACCESS_KEY" \
+            rustfs/rustfs:1.0.1
+          for i in $(seq 1 30); do curl -sf -o /dev/null http://localhost:9000/health && break; sleep 2; done
+
       - name: Unit + integration tests
         # ใน CI ห้าม skip เทสต์ที่ใช้ DB (ดู tests/conftest.py)
         run: pytest -q
 
-      - name: Load 3 days of real data
+      - name: Load 3 days of real data (landing = Parquet on S3)
         run: |
           python -m ingest.run init
           python -m ingest.split_batches

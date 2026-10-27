@@ -24,9 +24,10 @@ services:
         condition: service_healthy
     env_file: .env
     environment:
-      # pipeline ใน container ต่อ Postgres ผ่าน network ของ compose
+      # pipeline ใน container ต่อ Postgres / data lake ผ่าน network ของ compose
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
+      S3_ENDPOINT_URL: http://lake:9000
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
       AIRFLOW__CORE__LOAD_EXAMPLES: "false"
@@ -77,6 +78,22 @@ services:
       timeout: 5s
       retries: 30
 
+  # Data lake (bronze): S3-compatible object storage ในเครื่อง
+  # ใช้ RustFS แทน MinIO เพราะ MinIO เลิกเผยแพร่ image ฉบับ community แล้ว; โค้ดคุยผ่าน S3 API เหมือนกัน
+  lake:
+    image: rustfs/rustfs:1.0.1
+    container_name: ecommerce_lake
+    environment:
+      RUSTFS_ACCESS_KEY: ${AWS_ACCESS_KEY_ID}
+      RUSTFS_SECRET_KEY: ${AWS_SECRET_ACCESS_KEY}
+      RUSTFS_CONSOLE_ENABLE: "true"
+    ports:
+      - "9000:9000"   # S3 API
+      - "9001:9001"   # console
+    volumes:
+      - lakedata:/data
+
 volumes:
   pgdata:
+  lakedata:
   airflow_home:

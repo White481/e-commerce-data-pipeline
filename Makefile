@@ -1,4 +1,4 @@
-.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last airflow-up backfill dbt-build dbt-docs roles metabase-up metabase-setup test lint
+.PHONY: up down psql init-db create-tables clean-data load load-raw split load-day load-since-last airflow-up backfill dbt-build dbt-docs roles metabase-up metabase-setup lake-up test lint
 
 up:
 	docker compose up -d
@@ -58,6 +58,9 @@ metabase-up:  # http://localhost:3000
 
 metabase-setup:  # admin + database + 5 charts + dashboard (re-runnable)
 	python -m metabase.setup_dashboard
+
+lake-up:  # S3 API http://localhost:9000, console http://localhost:9001/rustfs/console/
+	docker compose up -d lake
 
 test:
 	pytest -q

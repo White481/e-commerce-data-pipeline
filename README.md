@@ -3,14 +3,14 @@
 [![CI](https://github.com/White481/e-commerce-data-pipeline/actions/workflows/ci.yml/badge.svg)](https://github.com/White481/e-commerce-data-pipeline/actions/workflows/ci.yml)
 
 A daily batch pipeline for the UCI Online Retail dataset (541,909 invoice lines, Dec 2010 – Dec 2011):
-validated, idempotent loads into Postgres, a dbt star schema, Airflow orchestration with backfills,
+a Parquet data lake on S3-compatible storage, validated idempotent loads into Postgres, a dbt star schema, Airflow orchestration with backfills,
 CI against a real database, and a Metabase dashboard on a read-only role. Everything runs locally
 with Docker.
 
 A separate project, **[e-commerce-ai-agent](https://github.com/White481/e-commerce-ai-agent)**,
 answers Thai/English questions over the same `marts` tables with an LLM, through its own read-only role.
 
-**Stack:** Python 3.12/3.14 · pandas · pandera · PostgreSQL 16 · dbt 1.12 · Airflow 3.3 · Metabase 0.64 · Docker Compose · GitHub Actions
+**Stack:** Python 3.12/3.14 · pandas · pandera · Parquet · S3 (RustFS) · PostgreSQL 16 · dbt 1.12 · Airflow 3.3 · Metabase 0.64 · Docker Compose · GitHub Actions
 
 ## 1. Results at a glance
 
@@ -22,15 +22,17 @@ answers Thai/English questions over the same `marts` tables with an LLM, through
 | Re-run the same day | 0 rows inserted, 0 updated (idempotent) |
 | Airflow backfill | January 2011, 31/31 runs green; a forced mid-run failure left no duplicates |
 | dbt | 5 models, 24 tests + a reconciliation test, all passing |
-| Tests | 37 pytest tests (unit + DB integration), run in CI on every PR |
+| Data lake | 305 daily Parquet partitions, 11 MB vs 46 MB as CSV; reloading all of them changed 0 rows |
+| Tests | 42 pytest tests (unit + DB + S3 integration), run in CI on every PR |
 | Dashboard | 5 charts on `marts`, read through a `SELECT`-only role |
 
 ## 2. Architecture
 
 ```mermaid
 flowchart LR
-    src["Online Retail.xlsx"] --> split["split_batches<br/>one CSV per day"]
-    split --> load["load_raw<br/>validate (pandera)"]
+    src["Online Retail.xlsx"] --> split["split_batches"]
+    split --> lake[("S3 data lake<br/>landing/date=YYYY-MM-DD/<br/>part-0.parquet")]
+    lake --> load["load_raw<br/>validate (pandera)"]
     load -->|valid rows| raw[("raw.online_retail")]
     load -->|rejected + reason| rej[("audit.rejected_rows")]
     load -->|1 row per run| runs[("audit.pipeline_runs")]
@@ -45,12 +47,13 @@ flowchart LR
     end
 ```
 
-| Layer | Schema | Built by | Purpose |
-|---|---|---|---|
-| Raw | `raw` | `ingest/load_raw.py` | Source rows that passed validation, keyed by `line_id` |
-| Audit | `audit` | `ingest/load_raw.py` | Every run (`pipeline_runs`) and every rejected row with its reason |
-| Staging | `staging` | dbt (view) | Typed, renamed columns + derived `total_amount`, `is_return` |
-| Marts | `marts` | dbt (tables) | Star schema for analysis and BI |
+| Layer | Medallion | Where | Built by | Purpose |
+|---|---|---|---|---|
+| Landing | bronze | S3 `landing/` | `ingest/split_batches.py` | Source files as delivered, one Parquet partition per day |
+| Raw | silver | `raw` | `ingest/load_raw.py` | Source rows that passed validation, keyed by `line_id` |
+| Audit | — | `audit` | `ingest/load_raw.py` | Every run (`pipeline_runs`) and every rejected row with its reason |
+| Staging | silver | `staging` | dbt (view) | Typed, renamed columns + derived `total_amount`, `is_return` |
+| Marts | gold | `marts` | dbt (tables) | Star schema for analysis and BI |
 
 ## 3. Data model
 
@@ -69,13 +72,19 @@ flowchart LR
 
 ## 4. How it works
 
+**Data lake** (`ingest/landing.py`). Each day is one Parquet file under a Hive-style partition,
+`<LANDING_URI>/date=YYYY-MM-DD/part-0.parquet`. All I/O goes through fsspec, so the same code
+reads `data/landing` on disk or `s3://ecommerce-lake/landing` on RustFS; pointing it at AWS S3 is
+a change to `.env` only (set `LANDING_URI`, drop `S3_ENDPOINT_URL`). The lake keeps files cheap
+and replayable; the warehouse (Postgres) holds validated, typed, query-ready tables.
+
 **Ingest + validate** (`ingest/load_raw.py`, `ingest/validate.py`). Each batch is validated with
 pandera: `unit_price <= 0`, cancelled invoice (`C…`) with positive quantity, null date, duplicate
 `line_id`. Bad rows go to `audit.rejected_rows`; good rows are COPY'd into a temp table and merged
 with `INSERT … ON CONFLICT (line_id)` in **one transaction**, so a failed load changes nothing.
 A **circuit breaker** stops the whole batch if more than 5% is rejected.
 
-**Incremental loading** (`ingest/run.py`). `load --date YYYY-MM-DD` loads one daily file and
+**Incremental loading** (`ingest/run.py`). `load --date YYYY-MM-DD` loads one daily partition and
 replaces that day; a day without a file is recorded as `skipped` and exits 0. `load --since-last`
 starts from the **watermark** (the latest day that actually has rows) and re-loads that day too, or
 from the first gap if an out-of-order load left one.
@@ -114,6 +123,8 @@ the Metabase API, so it is reproducible instead of hand-clicked. The
 | Watermark from the data, not the audit log | Deleted data is reloaded automatically | Needs the gap check so out-of-order loads can't skip days |
 | dbt incremental `delete+insert` per day | Same semantics as the loader, so Airflow retries stay idempotent | Dims are full rebuilds (cheap at this size) |
 | Pipeline deps in their own venv inside the Airflow image | pandas 3 / SQLAlchemy 2 don't collide with Airflow's pins | Two Python environments in one image |
+| Landing as Parquet on S3, through fsspec | Columnar + compressed (4× smaller), keeps types, readable by any engine; S3 API means local and cloud share one code path | Needs an object store running locally; small daily files would be compacted at scale |
+| RustFS instead of MinIO | MinIO no longer publishes community Docker images | Younger project; it's S3-compatible, so swapping it out is a config change |
 | One read-only role per consumer (`metabase_ro`) | Least privilege; one consumer's credentials can't break another | More roles to manage |
 
 **Reconciliation against the original v1 tables** (`public.*`, built by `clean_data.py` before this
@@ -139,6 +150,8 @@ Full log with numbers: [NOTES.md](NOTES.md). The ones worth knowing:
   test now uses a throwaway role.
 - **Upsert never deletes.** Rows loaded before validation existed stayed in raw until the load also
   removed rejected and vanished rows for the day.
+- **The roadmap's MinIO image no longer exists.** Switched to RustFS (also S3-compatible). Moving
+  to Parquet also caught a mixed-type `Description` column that CSV had hidden.
 - **The DB password was in git history.** Moving it to `.env` doesn't remove old commits, so it was
   rotated.
 
@@ -162,8 +175,8 @@ cp .env.example .env               # fill in the passwords
 python3 -m venv venv && source venv/bin/activate
 pip install -r requirements.txt
 
-make up                            # Postgres
-make split                         # data/landing/YYYY-MM-DD.csv
+make up                            # Postgres + data lake (RustFS console http://localhost:9001/rustfs/console/)
+make split                         # LANDING_URI/date=YYYY-MM-DD/part-0.parquet
 make load-since-last               # validate + load every day; stops at a day over the 5% breaker
 make dbt-build                     # staging + marts + tests
 make test && make lint
@@ -187,14 +200,14 @@ reconciliation above; `analyses/analysis_queries.sql` runs against either schema
 ## 9. Repository layout
 
 ```
-ingest/           load_raw, validate, run (CLI), split_batches, roles, db
+ingest/           landing (data lake I/O), load_raw, validate, run (CLI), split_batches, roles, db
 sql/init.sql      raw + audit schemas
 dbt_project/      staging and marts models, tests, profiles.yml (env-based)
 dags/             Airflow DAG
 airflow/          Airflow image (pipeline venv) + metadata DB init
 metabase/         dashboard-as-code via the Metabase API
-tests/            pytest: validation, idempotency, incremental, roles
-.github/workflows CI: lint, tests, real-data load, dbt build, role check
+tests/            pytest: validation, idempotency, incremental, data lake, roles
+.github/workflows CI: lint, tests, real-data load from S3, dbt build, role check
 docs/             screenshots, roadmap checklist
 NOTES.md          everything that went wrong, with numbers
 ```

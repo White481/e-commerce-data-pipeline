@@ -9,42 +9,32 @@ transform ทำด้วย dbt (dbt_project/) ไม่ได้อยู่�
 """
 
 import argparse
-import os
 import sys
 from datetime import date, timedelta
-from pathlib import Path
 
-import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from ingest import landing
 from ingest.db import get_engine
 from ingest.load_raw import init_db, load_raw, record_skipped
 from ingest.validate import MAX_REJECT_RATE, CircuitBreakerError
 
-LANDING_DIR = Path(os.getenv("LANDING_DIR", "data/landing"))
-def landing_file(day: date, landing_dir: Path = LANDING_DIR) -> Path:
-    return landing_dir / f"{day:%Y-%m-%d}.csv"
-
-
-def read_landing(path: Path) -> pd.DataFrame:
-    return pd.read_csv(
-        path, dtype={"InvoiceNo": str, "StockCode": str}, parse_dates=["InvoiceDate"]
-    )
-
 
 def load_day(
-    engine: Engine, day: date, landing_dir: Path = LANDING_DIR,
+    engine: Engine, day: date, uri: str | None = None,
     max_reject_rate: float = MAX_REJECT_RATE,
 ) -> dict:
-    path = landing_file(day, landing_dir)
-    if not path.exists():
-        run_id = record_skipped(engine, str(path), day)
-        print(f"{day}: ไม่มีไฟล์ {path} → skipped (run_id={run_id})")
+    """uri: landing zone (default จาก LANDING_URI) อาจเป็น path ในเครื่องหรือ s3://"""
+    source = landing.day_uri(day, uri)
+    df = landing.read_day(day, uri)
+    if df is None:
+        run_id = record_skipped(engine, source, day)
+        print(f"{day}: ไม่มีไฟล์ {source} → skipped (run_id={run_id})")
         return {"run_id": run_id, "status": "skipped"}
 
     rate = max(max_reject_rate, approved_reject_rate(engine, day))
-    summary = load_raw(read_landing(path), engine, str(path), day, rate)
+    summary = load_raw(df, engine, source, day, rate)
     print(
         f"{day}: อ่าน {summary['rows_read']} แถว, ปฏิเสธ {summary['rows_rejected']}, "
         f"โหลด {summary['rows_loaded']} (insert {summary['rows_inserted']}, "
@@ -81,12 +71,12 @@ def watermark(engine: Engine) -> date | None:
 
 
 def load_since_last(
-    engine: Engine, landing_dir: Path = LANDING_DIR,
+    engine: Engine, uri: str | None = None,
     max_reject_rate: float = MAX_REJECT_RATE,
 ) -> list[dict]:
-    available = sorted(date.fromisoformat(p.stem) for p in landing_dir.glob("*.csv"))
+    available = landing.list_days(uri)
     if not available:
-        print(f"ไม่มีไฟล์ใน {landing_dir}")
+        print(f"ไม่มีไฟล์ใน {uri or landing.landing_uri()}")
         return []
 
     # โหลดวัน watermark ซ้ำด้วย เผื่อรอบก่อนได้ข้อมูลของวันนั้นไม่ครบ
@@ -102,7 +92,7 @@ def load_since_last(
     day = start
     while day <= end:
         # วันที่ล้มจะหยุดทั้ง loop: ไม่ข้ามไปโหลดวันถัดไป รอบหน้าจะเริ่มใหม่จากตรงนี้
-        results.append(load_day(engine, day, landing_dir, max_reject_rate))
+        results.append(load_day(engine, day, uri, max_reject_rate))
         day += timedelta(days=1)
     return results
 
