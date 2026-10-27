@@ -148,6 +148,31 @@ Revenue total (`sum(quantity * unit_price)`) was 9,747,747.93 before and after.
   every build, and plain `GRANT SELECT ON ALL TABLES` would only cover the tables that existed then.
 - Stopped Airflow while running Metabase: Docker has 4 GB and Metabase's JVM alone wants ~1 GB.
 
+## Phase 8 — data lake (Parquet on S3-compatible storage)
+
+- **MinIO had no image to pull.** The roadmap says MinIO, but `minio/minio` on Docker Hub and Quay
+  both returned "not found" — MinIO stopped publishing community images. Used **RustFS 1.0.1**
+  instead: also S3-compatible, so the code doesn't know or care. Lesson: pin an exact image tag
+  and check it still exists before building on it.
+- **Parquet refused a mixed-type column.** `Description` holds a few numbers among the text, so
+  pyarrow failed with "Expected bytes, got a 'int' object". CSV never noticed because it stores
+  everything as text. Read the text columns as `str` on purpose.
+- **`make split` wrote locally, not to S3.** Only `ingest/db.py` loaded `.env`, and the split
+  doesn't touch the database, so `LANDING_URI` was unset and it fell back to `data/landing`.
+  `landing.py` now loads `.env` itself.
+- **The Airflow image had no `s3fs`.** Pipeline deps are baked into the image at build time;
+  changing `requirements.txt` needs `docker compose build airflow`.
+- Bucket creation needed no code: s3fs's `makedirs` creates the bucket if it's missing.
+- **Proof the format change lost nothing:** reloaded all 305 days from S3 on top of the CSV-loaded
+  raw table → 541,909 read, 2,517 rejected, 539,392 loaded, **0 inserted, 0 updated**, revenue
+  9,769,872.05 unchanged. A full DAG run from inside Airflow (2011-01-05) read
+  `s3://ecommerce-lake/landing/date=2011-01-05/part-0.parquet`, dbt build PASS=29, fact still 1,117 rows.
+  (`raw.source_file` keeps the old CSV path because it isn't a compared column; the new path is in
+  `audit.pipeline_runs`.)
+- Size and speed, 305 daily files: CSV 46 MB vs Parquet (snappy) 11 MB. Reading all files took
+  0.89 s for CSV, 0.37 s for Parquet, 0.21 s for only `Quantity` + `UnitPrice`, because a
+  columnar file can skip the columns you don't ask for.
+
 ## Git / GitHub workflow
 
 - **Stacked PRs merged into the wrong branches.** PRs #2–#6 were stacked (each based on the

@@ -2,7 +2,7 @@
 
 ## สถานะตอนนี้
 
-ทำครบทุก phase แล้ว Phase 0–7 และ 9 อยู่ใน `main` (Phase 8 เป็นทางเลือก ไม่ได้ทำ) เหลือแค่ฝึกตอบคำถามสัมภาษณ์ ลำดับทำงานตาม roadmap คือ 0 → 1 → 2 → 3 → 5 → 4 → 6 → 7 → 9 (Airflow มาก่อน dbt เพราะ dbt ต้องเสียบเข้า DAG)
+ทำครบทุก phase แล้ว Phase 0–7 และ 9 อยู่ใน `main` ส่วน Phase 8 (data lake) รอ merge เหลือแค่ฝึกตอบคำถามสัมภาษณ์ ลำดับทำงานตาม roadmap คือ 0 → 1 → 2 → 3 → 5 → 4 → 6 → 7 → 9 → 8 (Airflow มาก่อน dbt เพราะ dbt ต้องเสียบเข้า DAG)
 
 | Phase | เรื่อง | Status | PR |
 | --- | --- | --- | --- |
@@ -15,11 +15,13 @@
 | 6 | CI | Merged | #7 |
 | 7 | Dashboard Metabase + สิทธิ์อ่านอย่างเดียว | Merged | #8 |
 | 9 | README + เรซูเม่ | Merged | #9 |
+| 8 | Data lake: Parquet บน S3 | รอ merge | |
 
 **ทำต่อทันที**
 
 - [x] Merge PR ของ Phase 1–7 เข้า `main`
 - [x] Merge PR ของ Phase 9
+- [ ] Merge PR ของ Phase 8
 - [ ] ฝึกตอบคำถามใน `docs/interview_prep.md`
 
 ## Phase 0: วางรากฐาน
@@ -115,3 +117,20 @@
 - [x] ส่วน Limitations (เช่น line_id ขึ้นกับลำดับแถวในไฟล์ต้นทาง)
 - [x] เขียน resume bullet ด้วยตัวเลขจริง
 - [ ] ฝึกตอบคำถาม 10 ข้อด้วยคำพูดตัวเอง (`docs/interview_prep.md`)
+
+## Phase 8: Data lake ด้วย Parquet บน S3
+
+- [x] เพิ่ม object storage แบบ S3-compatible ใน `docker-compose.yml` (ใช้ RustFS 1.0.1 เพราะ MinIO ไม่มี image ให้ดึงแล้ว)
+- [x] เปลี่ยน landing เป็น Parquet แบ่ง partition `landing/date=YYYY-MM-DD/`
+- [x] ingest อ่านผ่าน S3 API (fsspec + s3fs) ถ้าจะย้ายไป AWS S3 แก้แค่ `.env`
+- [x] โหลดใหม่จาก S3 ครบ 305 วัน ได้ insert 0 และ update 0 (539,392 แถว รายได้ตรงเดิม)
+- [x] รัน DAG ใน Airflow ที่อ่านจาก S3 ผ่าน
+- [x] CI เปิด RustFS แล้วโหลดข้อมูลจริงจาก S3
+- [x] เทียบขนาดไฟล์: CSV 46 MB และ Parquet 11 MB
+
+**คำถามที่ต้องตอบได้ด้วยคำพูดตัวเอง**
+
+- [ ] Parquet แบบ columnar ต่างจาก CSV ยังไง
+- [ ] partition คืออะไร และช่วยอะไร
+- [ ] data lake ต่างจาก data warehouse ยังไง
+- [ ] medallion architecture: bronze, silver, gold ในโปรเจกต์นี้คืออะไร

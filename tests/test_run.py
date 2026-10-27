@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 from sqlalchemy import text
 
+from ingest.landing import read_day, write_day
 from ingest.run import load_day, load_since_last, notify, watermark
 from ingest.split_batches import split
 from ingest.validate import CircuitBreakerError
@@ -29,8 +30,8 @@ def landing(tmp_path):
                 "Quantity": 2, "InvoiceDate": pd.Timestamp(day) + pd.Timedelta(hours=9 + line),
                 "UnitPrice": 1.5, "CustomerID": 17850.0, "Country": "United Kingdom",
             })
-    split(pd.DataFrame(rows), tmp_path)
-    return tmp_path
+    split(pd.DataFrame(rows), str(tmp_path))
+    return str(tmp_path)
 
 
 def _count(engine):
@@ -45,8 +46,9 @@ def _statuses(engine):
         )).all()
 
 
-def test_split_writes_one_file_per_day(landing):
-    assert sorted(p.stem for p in landing.glob("*.csv")) == [f"{d:%Y-%m-%d}" for d in DAYS]
+def test_split_writes_one_partition_per_day(landing, tmp_path):
+    partitions = sorted(p.parent.name for p in tmp_path.glob("date=*/part-0.parquet"))
+    assert partitions == [f"date={d:%Y-%m-%d}" for d in DAYS]
 
 
 def test_load_five_days_twice_keeps_count(engine, landing):
@@ -85,19 +87,17 @@ def test_since_last_on_empty_db_starts_at_first_file(engine, landing):
 
 def test_day_file_replaces_that_day(engine, landing):
     load_day(engine, DAYS[0], landing)
-    path = landing / "2010-12-01.csv"
-    df = pd.read_csv(path)
-    df.iloc[:2].to_csv(path, index=False)  # ต้นทางแก้ไฟล์ เหลือ 2 บรรทัด
+    df = read_day(DAYS[0], landing)
+    write_day(df.iloc[:2], DAYS[0], landing)  # ต้นทางแก้ไฟล์ เหลือ 2 บรรทัด
 
     load_day(engine, DAYS[0], landing)
     assert _count(engine) == 2
 
 
 def test_reviewed_override_lets_high_reject_day_through(engine, landing):
-    path = landing / "2010-12-01.csv"
-    df = pd.read_csv(path)
+    df = read_day(DAYS[0], landing)
     df.loc[0, "UnitPrice"] = 0  # 1/3 = 33%
-    df.to_csv(path, index=False)
+    write_day(df, DAYS[0], landing)
 
     with pytest.raises(CircuitBreakerError):
         load_day(engine, DAYS[0], landing)
@@ -112,10 +112,9 @@ def test_reviewed_override_lets_high_reject_day_through(engine, landing):
 
 
 def test_approved_override_is_remembered_on_reload(engine, landing):
-    path = landing / "2010-12-06.csv"
-    df = pd.read_csv(path)
+    df = read_day(DAYS[-1], landing)
     df.loc[0, "UnitPrice"] = 0
-    df.to_csv(path, index=False)
+    write_day(df, DAYS[-1], landing)
 
     with pytest.raises(CircuitBreakerError):
         load_since_last(engine, landing)  # breaker ตัดที่ 6 ธ.ค.

@@ -4,6 +4,9 @@ SQLAlchemy==2.0.41
 psycopg2-binary==2.9.12
 python-dotenv==1.2.3
 pandera==0.34.1
+pyarrow==26.0.0
+s3fs==2026.9.0
+fsspec==2026.9.0
 dbt-core==1.12.6
 dbt-postgres==1.11.0
 

@@ -138,10 +138,27 @@
 
 **ถ้าใหญ่ขึ้น 100 เท่า**
 - partition `raw` และ `fact_sales` ตามวัน
-- เก็บไฟล์ใน object storage (S3) ใช้ warehouse ที่ scale ได้
+- landing อยู่บน S3 แล้ว (Phase 8) จึงย้ายไป AWS ได้ทันที ใช้ warehouse ที่ scale ได้ (BigQuery, Snowflake) หรือ query Parquet ตรง ๆ ด้วย DuckDB, Athena หรือ Spark
 - รัน validate แบบ streaming หรือแบ่ง chunk
 - dims เป็น incremental หรือ SCD แทนการ rebuild ทั้งหมด
 - แจ้งเตือนจาก notify ไป Slack หรือ email
+
+**คำตอบของฉัน**
+
+&nbsp;
+
+---
+
+## 11. ทำไม landing เป็น Parquet บน S3 และ data lake ต่างจาก warehouse ยังไง
+
+**ประเด็น**
+- Parquet เป็น columnar: เก็บข้อมูลทีละคอลัมน์ บีบอัดได้ดีและเก็บชนิดข้อมูลไว้ด้วย 305 ไฟล์ขนาด 11 MB เทียบกับ CSV ที่ 46 MB ถ้าอ่านแค่ 2 คอลัมน์ก็ไม่ต้องอ่านทั้งไฟล์
+- partition `date=YYYY-MM-DD/`: โหลดหรือโหลดซ้ำทีละวันได้โดยไม่ต้องสแกนทั้งหมด และเป็นรูปแบบ Hive ที่ Spark, Athena และ DuckDB อ่านได้เลย
+- lake เก็บไฟล์ดิบราคาถูก จะ replay ใหม่เมื่อไหร่ก็ได้ ส่วน warehouse (Postgres) เก็บตารางที่ผ่าน validate แล้ว มี type ครบและพร้อม query
+- medallion: landing คือ bronze, raw และ staging คือ silver, marts คือ gold
+- อ่านผ่าน fsspec และ S3 API จึงใช้โค้ดชุดเดียวกันได้ทั้งในเครื่อง, RustFS และ AWS
+- หลักฐาน: โหลดใหม่ครบ 305 วันจาก S3 ได้ insert 0 และ update 0
+- เรื่องที่เจอ: image ของ MinIO ไม่มีให้ดึงแล้ว จึงเปลี่ยนไปใช้ RustFS ที่เป็น S3-compatible เหมือนกัน และ Parquet ช่วยให้เจอคอลัมน์ Description ที่มีชนิดข้อมูลปนกัน ซึ่ง CSV ซ่อนไว้
 
 **คำตอบของฉัน**
 
